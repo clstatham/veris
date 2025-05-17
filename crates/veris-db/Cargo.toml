@@ -1,0 +1,12 @@
+[package]
+name = "veris-db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = {workspace = true}
+derive_more = {workspace = true}
+sqlparser = {workspace = true}
+thiserror = {workspace = true}
+log = {workspace = true}
+dyn-clone = "1.0.19"

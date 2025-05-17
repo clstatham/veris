@@ -1,0 +1,25 @@
+[package]
+name = "veris-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true}
+clap = { workspace = true}
+clap-serde = { workspace = true}
+clap-serde-derive = {workspace = true}
+serde = { workspace = true}
+sqlparser = { workspace = true}
+thiserror = {workspace = true}
+tokio = { workspace = true}
+toml = {workspace = true}
+log = {workspace = true}
+env_logger = {workspace = true}
+serde_json = {workspace = true}
+
+
+[dependencies.veris-db]
+path = "../veris-db"
+
+[dependencies.veris-net]
+path = "../veris-net"

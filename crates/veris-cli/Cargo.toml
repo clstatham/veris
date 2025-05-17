@@ -1,0 +1,21 @@
+[package]
+name = "veris-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true}
+clap = { workspace = true}
+clap-serde = { workspace = true}
+clap-serde-derive = {workspace = true}
+rustyline = "15.0.0"
+serde = { workspace = true}
+serde_json = "1.0.140"
+sqlparser = { workspace = true}
+thiserror = {workspace = true}
+toml = {workspace = true}
+log = {workspace = true}
+env_logger = {workspace = true}
+
+[dependencies.veris-net]
+path = "../veris-net"
