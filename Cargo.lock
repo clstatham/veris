@@ -1004,6 +1004,7 @@ dependencies = [
  "sqlparser",
  "thiserror",
  "toml",
+ "veris-db",
  "veris-net",
 ]
 
@@ -1023,11 +1024,13 @@ dependencies = [
 name = "veris-net"
 version = "0.1.0"
 dependencies = [
+ "derive_more",
  "serde",
  "sqlparser",
  "thiserror",
  "tokio",
  "toml",
+ "veris-db",
 ]
 
 [[package]]

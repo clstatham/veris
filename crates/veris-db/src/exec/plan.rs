@@ -2,7 +2,7 @@ use sqlparser::ast;
 
 use crate::{
     engine::{Catalog, EngineError, Transaction},
-    types::schema::Table,
+    types::{schema::Table, value::Value},
 };
 
 use super::Executor;
@@ -34,7 +34,7 @@ pub enum Plan {
 }
 
 impl Plan {
-    pub fn execute(self, txn: &impl Transaction) -> Result<(), EngineError> {
+    pub fn execute(self, txn: &impl Transaction) -> Result<Value, EngineError> {
         Executor::new(txn).execute(self)
     }
 }

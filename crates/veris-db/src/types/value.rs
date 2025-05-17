@@ -37,8 +37,9 @@ impl TryFrom<&ast::DataType> for DataType {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Display)]
 pub enum Value {
+    #[display("NULL")]
     Null,
     Boolean(bool),
     Integer(i64),

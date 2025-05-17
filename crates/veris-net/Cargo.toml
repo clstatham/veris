@@ -9,3 +9,7 @@ sqlparser = { workspace = true}
 thiserror = {workspace = true}
 tokio = { workspace = true}
 toml = {workspace = true}
+derive_more = {workspace = true}
+
+[dependencies.veris-db]
+path = "../veris-db"

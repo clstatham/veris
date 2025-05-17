@@ -6,6 +6,7 @@ use std::{
 use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 use sqlparser::parser::ParserError;
 use thiserror::Error;
+use veris_db::types::value::Value;
 use veris_net::request::{Request, Response};
 
 use crate::Config;
@@ -18,6 +19,13 @@ pub enum ClientError {
     SqlParser(#[from] ParserError),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Debug)]
+pub enum ControlFlow {
+    Exit,
+    Continue,
+    Response(Response),
 }
 
 pub struct Client {
@@ -53,6 +61,8 @@ impl Client {
 
         let mut rx = BufReader::new(socket.try_clone()?);
 
+        println!("Press Ctrl-D (EOF) to exit.");
+
         'repl: loop {
             let readline = rl.readline(">>> ");
             match readline {
@@ -60,28 +70,43 @@ impl Client {
                     let line = line.trim();
                     rl.add_history_entry(line)?;
 
-                    if let Err(e) = self.handle_line(line, &mut socket, &mut rx) {
-                        if let ClientError::Serialization(e) = &e {
-                            if let Some(kind) = e.io_error_kind() {
-                                if matches!(
-                                    kind,
-                                    io::ErrorKind::UnexpectedEof
-                                        | io::ErrorKind::ConnectionReset
-                                        | io::ErrorKind::ConnectionAborted
-                                        | io::ErrorKind::BrokenPipe
-                                ) {
-                                    log::warn!("Server closed connection");
-                                    break 'repl;
+                    match self.handle_line(line, &mut socket, &mut rx) {
+                        Ok(cf) => match cf {
+                            ControlFlow::Exit => {
+                                log::info!("Exiting REPL");
+                                break 'repl;
+                            }
+                            ControlFlow::Continue => {}
+                            ControlFlow::Response(resp) => {
+                                if !matches!(resp, Response::Execute(Value::Null)) {
+                                    println!("{resp}");
                                 }
                             }
+                        },
+                        Err(e) => {
+                            if let ClientError::Serialization(e) = &e {
+                                if let Some(kind) = e.io_error_kind() {
+                                    if matches!(
+                                        kind,
+                                        io::ErrorKind::UnexpectedEof
+                                            | io::ErrorKind::ConnectionReset
+                                            | io::ErrorKind::ConnectionAborted
+                                            | io::ErrorKind::BrokenPipe
+                                    ) {
+                                        log::warn!("Server closed connection");
+                                        break 'repl;
+                                    }
+                                }
+                            }
+                            log::error!("Error: {e}");
                         }
-                        log::error!("Error: {e}");
                     }
                 }
                 Err(ReadlineError::Interrupted) => {
                     log::warn!("Interrupted")
                 }
                 Err(ReadlineError::Eof) => {
+                    println!("Exiting REPL");
                     break 'repl;
                 }
                 Err(e) => {
@@ -102,12 +127,14 @@ impl Client {
         line: &str,
         tx: &mut impl Write,
         rx: &mut BufReader<TcpStream>,
-    ) -> Result<(), ClientError> {
-        let req = if line.split_whitespace().next() == Some("?") {
-            let line: String = line.split_whitespace().skip(1).collect();
-            Request::Debug(line.lines().collect())
-        } else {
-            Request::Execute(line.lines().collect())
+    ) -> Result<ControlFlow, ClientError> {
+        let Some(first) = line.split_whitespace().next() else {
+            return Ok(ControlFlow::Continue); // empty line
+        };
+        let req = match first {
+            ".q" => return Ok(ControlFlow::Exit),
+            ".?" => Request::Debug(line.split_whitespace().skip(1).collect()),
+            _ => Request::Execute(line.lines().collect()),
         };
         let req = serde_json::to_string(&req)?;
         writeln!(tx, "{}", req)?;
@@ -115,16 +142,7 @@ impl Client {
         let mut resp = String::new();
         rx.read_line(&mut resp)?;
         let resp: Response = serde_json::from_str(&resp)?;
-        match resp {
-            Response::Execute(()) => {}
-            Response::Debug(result) => {
-                println!("{}", result);
-            }
-            Response::Error(error) => {
-                log::error!("Error: {}", error);
-            }
-        }
 
-        Ok(())
+        Ok(ControlFlow::Response(resp))
     }
 }

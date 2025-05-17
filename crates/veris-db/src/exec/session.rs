@@ -1,6 +1,9 @@
 use sqlparser::ast;
 
-use crate::engine::{Engine, EngineError, Transaction};
+use crate::{
+    engine::{Engine, EngineError, Transaction},
+    types::value::Value,
+};
 
 use super::plan::Planner;
 
@@ -17,7 +20,7 @@ impl<'a, E: Engine<'a>> Session<'a, E> {
         }
     }
 
-    pub fn exec(&mut self, statement: &ast::Statement) -> Result<(), EngineError> {
+    pub fn exec(&mut self, statement: &ast::Statement) -> Result<Value, EngineError> {
         match statement {
             ast::Statement::StartTransaction { .. } => {
                 self.begin()?;
@@ -29,11 +32,11 @@ impl<'a, E: Engine<'a>> Session<'a, E> {
                 self.rollback()?;
             }
             statement => {
-                self.with_transaction(|t| Planner::new(t).plan(statement)?.execute(t))?;
+                return self.with_transaction(|t| Planner::new(t).plan(statement)?.execute(t));
             }
         }
 
-        Ok(())
+        Ok(Value::Null)
     }
 
     pub fn with_transaction<F, R>(&mut self, f: F) -> Result<R, EngineError>

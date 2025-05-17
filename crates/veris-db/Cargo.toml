@@ -10,3 +10,4 @@ sqlparser = {workspace = true}
 thiserror = {workspace = true}
 log = {workspace = true}
 dyn-clone = "1.0.19"
+

@@ -19,3 +19,6 @@ env_logger = {workspace = true}
 
 [dependencies.veris-net]
 path = "../veris-net"
+
+[dependencies.veris-db]
+path = "../veris-db"

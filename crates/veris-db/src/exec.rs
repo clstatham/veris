@@ -1,6 +1,9 @@
 use plan::Plan;
 
-use crate::engine::{EngineError, Transaction};
+use crate::{
+    engine::{EngineError, Transaction},
+    types::value::Value,
+};
 
 pub mod plan;
 pub mod session;
@@ -14,11 +17,11 @@ impl<'a, T: Transaction> Executor<'a, T> {
         Self { txn }
     }
 
-    pub fn execute(&mut self, plan: Plan) -> Result<(), EngineError> {
+    pub fn execute(&mut self, plan: Plan) -> Result<Value, EngineError> {
         match plan {
             Plan::CreateTable(table) => {
                 self.txn.create_table(table)?;
-                Ok(())
+                Ok(Value::Null)
             }
         }
     }

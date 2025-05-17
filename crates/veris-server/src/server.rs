@@ -3,7 +3,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
-use veris_db::{engine::debug::DebugEngine, exec::session::Session};
+use veris_db::{engine::debug::DebugEngine, exec::session::Session, types::value::Value};
 use veris_net::request::{Request, Response};
 
 use crate::Config;
@@ -46,6 +46,7 @@ impl Server {
                 if let Err(e) = Self::sql_session(&mut socket, Session::new(&DebugEngine)).await {
                     log::error!("Error in SQL session: {}", e);
                 }
+                log::info!("Closing SQL connection to {}", socket.peer_addr().unwrap());
                 socket.shutdown().await.ok();
             });
         }
@@ -69,11 +70,9 @@ impl Server {
                     continue;
                 }
             };
-            log::info!("Received request: {:?}", req);
 
-            let resp = Self::process_request(&mut session, &req).await;
+            let resp = Self::process_request(&mut session, &req);
 
-            log::info!("Sending response: {:?}", resp);
             let resp = format!("{}\n", serde_json::to_string(&resp)?);
             tx.write_all(resp.as_bytes()).await?;
         }
@@ -81,10 +80,7 @@ impl Server {
         Ok(())
     }
 
-    async fn process_request(
-        session: &mut Session<'_, DebugEngine>,
-        request: &Request,
-    ) -> Response {
+    fn process_request(session: &mut Session<'_, DebugEngine>, request: &Request) -> Response {
         match request {
             Request::Debug(sql) => {
                 let ast = match Parser::parse_sql(&GenericDialect {}, sql) {
@@ -105,9 +101,12 @@ impl Server {
                     }
                 };
 
+                let mut result = Value::Null;
                 for statement in &ast {
                     match session.exec(statement) {
-                        Ok(()) => {}
+                        Ok(val) => {
+                            result = val;
+                        }
                         Err(e) => {
                             log::error!("Failed to execute SQL: {}", e);
                             return Response::Error(e.to_string());
@@ -115,7 +114,7 @@ impl Server {
                     }
                 }
 
-                Response::Execute(())
+                Response::Execute(result)
             }
         }
     }
