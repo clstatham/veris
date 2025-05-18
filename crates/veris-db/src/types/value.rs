@@ -1,9 +1,12 @@
 use std::hash::Hash;
 
-use derive_more::{Deref, DerefMut, Display};
+use derive_more::{Deref, DerefMut, Display, From};
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
-use thiserror::Error;
+
+use crate::error::Error;
+
+use super::schema::{ColumnName, TableName};
 
 #[derive(Clone, Copy, Debug, PartialEq, Hash, Serialize, Deserialize, Display)]
 pub enum DataType {
@@ -17,14 +20,8 @@ pub enum DataType {
     String,
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum ConvertDataTypeError {
-    #[error("Invalid data type: {0}")]
-    InvalidDataType(ast::DataType),
-}
-
 impl TryFrom<&ast::DataType> for DataType {
-    type Error = ConvertDataTypeError;
+    type Error = Error;
 
     fn try_from(value: &ast::DataType) -> Result<Self, Self::Error> {
         match value {
@@ -32,7 +29,7 @@ impl TryFrom<&ast::DataType> for DataType {
             ast::DataType::Integer(_) | ast::DataType::Int(_) => Ok(DataType::Integer),
             ast::DataType::Float(_) => Ok(DataType::Float),
             ast::DataType::String(_) => Ok(DataType::String),
-            _ => Err(ConvertDataTypeError::InvalidDataType(value.clone())),
+            _ => Err(Error::InvalidDataType(value.clone())),
         }
     }
 }
@@ -124,15 +121,8 @@ impl PartialOrd for Value {
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("Error converting value from AST")]
-pub enum ConvertValueError {
-    #[error("Invalid value: {0}")]
-    InvalidValue(Box<ast::Value>),
-}
-
 impl TryFrom<&ast::Value> for Value {
-    type Error = ConvertValueError;
+    type Error = Error;
 
     fn try_from(value: &ast::Value) -> Result<Self, Self::Error> {
         match value {
@@ -144,20 +134,65 @@ impl TryFrom<&ast::Value> for Value {
                 } else if let Ok(f) = n.parse::<f64>() {
                     Ok(Value::Float(f))
                 } else {
-                    Err(ConvertValueError::InvalidValue(Box::new(value.clone())))
+                    Err(Error::InvalidValue(Box::new(value.clone())))
                 }
             }
-            ast::Value::SingleQuotedString(s) | ast::Value::DoubleQuotedString(s) => {
-                Ok(Value::String(s.clone()))
-            }
+            ast::Value::SingleQuotedString(s) => Ok(Value::String(s.clone())),
 
-            _ => Err(ConvertValueError::InvalidValue(Box::new(value.clone()))),
+            _ => Err(Error::InvalidValue(Box::new(value.clone()))),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Deref, DerefMut)]
-pub struct Row(Vec<Value>);
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Deref,
+    DerefMut,
+    Display,
+    From,
+)]
+#[display("{:?}", self.0)]
+pub struct Row(Box<[Value]>);
+
+impl FromIterator<Value> for Row {
+    fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
+        let vec: Vec<Value> = iter.into_iter().collect();
+        Row(vec.into_boxed_slice())
+    }
+}
+
+impl IntoIterator for Row {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+pub trait RowIter: Iterator<Item = Result<Row, Error>> {}
+// dyn_clone::clone_trait_object!(RowIter);
+impl<T: Iterator<Item = Result<Row, Error>>> RowIter for T {}
+
+pub type Rows = Box<dyn RowIter>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
+pub enum ColumnLabel {
+    #[display("")]
+    None,
+    #[display("{}", 0)]
+    Unqualified(ColumnName),
+    #[display("{}.{}", 0, 1)]
+    Qualified(TableName, ColumnName),
+}
 
 #[cfg(test)]
 mod tests {
@@ -187,10 +222,7 @@ mod tests {
         let ast_data_type = ast::DataType::Date;
         let result = DataType::try_from(&ast_data_type);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            ConvertDataTypeError::InvalidDataType(ast_data_type)
-        );
+        assert_eq!(result.unwrap_err(), Error::InvalidDataType(ast_data_type));
     }
 
     #[test]
@@ -220,7 +252,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            ConvertValueError::InvalidValue(Box::new(ast_value))
+            Error::InvalidValue(Box::new(ast_value))
         );
     }
 }

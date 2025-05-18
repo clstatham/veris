@@ -1,11 +1,46 @@
+use derive_more::Display;
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
 use crate::{
-    engine::{Engine, EngineError, Transaction},
-    types::value::Value,
+    engine::{Engine, Transaction},
+    error::Error,
+    types::{schema::TableName, value::Row},
 };
 
-use super::plan::Planner;
+use super::{ExecResult, plan::Planner};
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Display)]
+pub enum StatementResult {
+    Null,
+    Begin,
+    Commit,
+    Rollback,
+    CreateTable(TableName),
+    DropTable(TableName),
+    Delete(usize),
+    Insert(usize),
+    #[display("{:?}", rows)]
+    Select {
+        rows: Vec<Row>,
+    },
+}
+
+impl TryFrom<ExecResult> for StatementResult {
+    type Error = Error;
+
+    fn try_from(result: ExecResult) -> Result<Self, Self::Error> {
+        match result {
+            ExecResult::Null => Ok(StatementResult::Begin),
+            ExecResult::Table(name) => Ok(StatementResult::CreateTable(name)),
+            ExecResult::Rows(rows) => Ok(StatementResult::Select {
+                rows: rows.into_iter().try_collect()?,
+            }),
+            ExecResult::Count(count) => Ok(StatementResult::Insert(count)),
+        }
+    }
+}
 
 pub struct Session<'a, E: Engine<'a>> {
     engine: &'a E,
@@ -20,28 +55,29 @@ impl<'a, E: Engine<'a>> Session<'a, E> {
         }
     }
 
-    pub fn exec(&mut self, statement: &ast::Statement) -> Result<Value, EngineError> {
+    pub fn exec(&mut self, statement: &ast::Statement) -> Result<StatementResult, Error> {
         match statement {
             ast::Statement::StartTransaction { .. } => {
                 self.begin()?;
+                Ok(StatementResult::Begin)
             }
             ast::Statement::Commit { .. } => {
                 self.commit()?;
+                Ok(StatementResult::Commit)
             }
             ast::Statement::Rollback { .. } => {
                 self.rollback()?;
+                Ok(StatementResult::Rollback)
             }
-            statement => {
-                return self.with_transaction(|t| Planner::new(t).plan(statement)?.execute(t));
-            }
+            statement => self
+                .with_transaction(|t| Planner::new(t).plan(statement)?.execute(t))?
+                .try_into(),
         }
-
-        Ok(Value::Null)
     }
 
-    pub fn with_transaction<F, R>(&mut self, f: F) -> Result<R, EngineError>
+    pub fn with_transaction<F, R>(&mut self, f: F) -> Result<R, Error>
     where
-        F: FnOnce(&mut E::Transaction) -> Result<R, EngineError>,
+        F: FnOnce(&mut E::Transaction) -> Result<R, Error>,
     {
         if let Some(txn) = self.current_transaction.as_mut() {
             return f(txn);
@@ -57,28 +93,28 @@ impl<'a, E: Engine<'a>> Session<'a, E> {
         res
     }
 
-    pub fn begin(&mut self) -> Result<(), EngineError> {
+    pub fn begin(&mut self) -> Result<(), Error> {
         if self.current_transaction.is_some() {
-            return Err(EngineError::AlreadyInTransaction);
+            return Err(Error::AlreadyInTransaction);
         }
         self.current_transaction = Some(self.engine.begin()?);
         Ok(())
     }
 
-    pub fn commit(&mut self) -> Result<(), EngineError> {
+    pub fn commit(&mut self) -> Result<(), Error> {
         if let Some(transaction) = self.current_transaction.take() {
             transaction.commit()?;
         } else {
-            return Err(EngineError::NotInTransaction);
+            return Err(Error::NotInTransaction);
         }
         Ok(())
     }
 
-    pub fn rollback(&mut self) -> Result<(), EngineError> {
+    pub fn rollback(&mut self) -> Result<(), Error> {
         if let Some(transaction) = self.current_transaction.take() {
             transaction.rollback()?;
         } else {
-            return Err(EngineError::NotInTransaction);
+            return Err(Error::NotInTransaction);
         }
         Ok(())
     }

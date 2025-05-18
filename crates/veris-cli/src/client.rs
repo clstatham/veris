@@ -6,7 +6,6 @@ use std::{
 use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 use sqlparser::parser::ParserError;
 use thiserror::Error;
-use veris_db::types::value::Value;
 use veris_net::request::{Request, Response};
 
 use crate::Config;
@@ -61,7 +60,7 @@ impl Client {
 
         let mut rx = BufReader::new(socket.try_clone()?);
 
-        println!("Press Ctrl-D (EOF) to exit.");
+        println!("Type .q or press Ctrl-D to exit.");
 
         'repl: loop {
             let readline = rl.readline(">>> ");
@@ -77,11 +76,17 @@ impl Client {
                                 break 'repl;
                             }
                             ControlFlow::Continue => {}
-                            ControlFlow::Response(resp) => {
-                                if !matches!(resp, Response::Execute(Value::Null)) {
+                            ControlFlow::Response(resp) => match resp {
+                                Response::Execute(resp) => {
                                     println!("{resp}");
                                 }
-                            }
+                                Response::Error(resp) => {
+                                    println!("Error: {resp}")
+                                }
+                                Response::Debug(resp) => {
+                                    println!("{resp}")
+                                }
+                            },
                         },
                         Err(e) => {
                             if let ClientError::Serialization(e) = &e {

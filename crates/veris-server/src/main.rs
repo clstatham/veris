@@ -29,7 +29,7 @@ pub struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_module("veris_server", log::LevelFilter::Debug)
         .parse_env("VERIS_LOG")
         .init();
 

@@ -1,6 +1,6 @@
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
-use veris_db::types::value::Value;
+use veris_db::exec::session::StatementResult;
 
 #[derive(Debug, Serialize, Deserialize, Display)]
 pub enum Request {
@@ -10,7 +10,7 @@ pub enum Request {
 
 #[derive(Debug, Serialize, Deserialize, Display)]
 pub enum Response {
-    Execute(Value),
+    Execute(StatementResult),
     Debug(String),
     Error(String),
 }

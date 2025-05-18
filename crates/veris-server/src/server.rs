@@ -3,18 +3,28 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
-use veris_db::{engine::debug::DebugEngine, exec::session::Session, types::value::Value};
+use veris_db::{
+    engine::local::Local,
+    exec::session::{Session, StatementResult},
+    storage::bitcask::Bitcask,
+};
 use veris_net::request::{Request, Response};
 
 use crate::Config;
 
+pub type Engine = Bitcask;
+
 pub struct Server {
     config: Config,
+    engine: Local<Engine>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            engine: Local::new(Engine::new("./data/db1").unwrap()),
+        }
     }
 
     pub async fn serve(self) -> anyhow::Result<()> {
@@ -26,7 +36,7 @@ impl Server {
                 log::info!("Received Ctrl-C, shutting down");
             }
 
-            res = Self::sql_accept(sql_listener) => {
+            res = Self::sql_accept(sql_listener, &self.engine) => {
                 if let Err(e) = res {
                     log::error!("Error in SQL connection: {}", e);
                 }
@@ -36,25 +46,23 @@ impl Server {
         Ok(())
     }
 
-    async fn sql_accept(listener: TcpListener) -> anyhow::Result<()> {
+    async fn sql_accept(listener: TcpListener, engine: &Local<Engine>) -> anyhow::Result<()> {
         loop {
             let (mut socket, _) = listener.accept().await?;
             log::info!("Accepted SQL connection from {}", socket.peer_addr()?);
             socket.set_nodelay(true)?;
-            // Handle the connection in a separate task
-            tokio::spawn(async move {
-                if let Err(e) = Self::sql_session(&mut socket, Session::new(&DebugEngine)).await {
-                    log::error!("Error in SQL session: {}", e);
-                }
-                log::info!("Closing SQL connection to {}", socket.peer_addr().unwrap());
-                socket.shutdown().await.ok();
-            });
+
+            if let Err(e) = Self::sql_session(&mut socket, Session::new(engine)).await {
+                log::error!("Error in SQL session: {}", e);
+            }
+            log::info!("Closing SQL connection to {}", socket.peer_addr().unwrap());
+            socket.shutdown().await.ok();
         }
     }
 
     async fn sql_session(
         socket: &mut TcpStream,
-        mut session: Session<'_, DebugEngine>,
+        mut session: Session<'_, Local<Engine>>,
     ) -> anyhow::Result<()> {
         let (rx, mut tx) = socket.split();
         let rx = BufReader::new(rx);
@@ -80,7 +88,7 @@ impl Server {
         Ok(())
     }
 
-    fn process_request(session: &mut Session<'_, DebugEngine>, request: &Request) -> Response {
+    fn process_request(session: &mut Session<'_, Local<Engine>>, request: &Request) -> Response {
         match request {
             Request::Debug(sql) => {
                 let ast = match Parser::parse_sql(&GenericDialect {}, sql) {
@@ -101,7 +109,7 @@ impl Server {
                     }
                 };
 
-                let mut result = Value::Null;
+                let mut result = StatementResult::Null;
                 for statement in &ast {
                     match session.exec(statement) {
                         Ok(val) => {

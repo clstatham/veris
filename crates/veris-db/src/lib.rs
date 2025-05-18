@@ -12,5 +12,8 @@
 pub mod types;
 #[macro_use]
 pub mod util;
+pub mod encoding;
 pub mod engine;
+pub mod error;
 pub mod exec;
+pub mod storage;

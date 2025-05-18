@@ -1,11 +1,10 @@
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
-use thiserror::Error;
 
-use crate::wrap;
+use crate::{error::Error, wrap};
 
-use super::value::{ConvertDataTypeError, DataType};
+use super::value::DataType;
 
 wrap! {
     #[derive(Clone, Debug, Display, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -25,31 +24,23 @@ pub struct Table {
     pub columns: Vec<Column>,
 }
 
-#[derive(Debug, Error)]
-#[error("Error converting table from AST")]
-pub enum ConvertTableError {
-    InvalidColumn(#[from] ConvertColumnError),
-    #[error("Invalid primary key: {0}")]
-    InvalidPrimaryKey(Box<ast::Expr>),
-}
-
 impl TryFrom<&ast::CreateTable> for Table {
-    type Error = ConvertTableError;
+    type Error = Error;
 
     fn try_from(value: &ast::CreateTable) -> Result<Self, Self::Error> {
         let mut primary_key_index = ColumnIndex::new(0);
         if let Some(primary_key) = value.primary_key.as_ref() {
             if let ast::Expr::Value(v) = &**primary_key {
                 if let ast::Value::Number(a, _) = &v.value {
-                    primary_key_index =
-                        ColumnIndex::new(a.parse().map_err(|_| {
-                            ConvertTableError::InvalidPrimaryKey(primary_key.clone())
-                        })?);
+                    primary_key_index = ColumnIndex::new(
+                        a.parse()
+                            .map_err(|_| Error::InvalidPrimaryKey(primary_key.clone()))?,
+                    );
                 } else {
-                    return Err(ConvertTableError::InvalidPrimaryKey(primary_key.clone()));
+                    return Err(Error::InvalidPrimaryKey(primary_key.clone()));
                 }
             } else {
-                return Err(ConvertTableError::InvalidPrimaryKey(primary_key.clone()));
+                return Err(Error::InvalidPrimaryKey(primary_key.clone()));
             }
         }
         let mut columns = Vec::new();
@@ -71,14 +62,8 @@ pub struct Column {
     pub data_type: DataType,
 }
 
-#[derive(Debug, Error)]
-#[error("Error converting column from AST")]
-pub enum ConvertColumnError {
-    InvalidDataType(#[from] ConvertDataTypeError),
-}
-
 impl TryFrom<&ast::ColumnDef> for Column {
-    type Error = ConvertColumnError;
+    type Error = Error;
 
     fn try_from(value: &ast::ColumnDef) -> Result<Self, Self::Error> {
         Ok(Column {
