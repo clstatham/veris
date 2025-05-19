@@ -2,7 +2,7 @@ use derive_more::Display;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
-use crate::{error::Error, wrap};
+use crate::{encoding::ValueEncoding, error::Error, wrap};
 
 use super::value::DataType;
 
@@ -23,6 +23,8 @@ pub struct Table {
     pub primary_key_index: ColumnIndex,
     pub columns: Vec<Column>,
 }
+
+impl ValueEncoding for Table {}
 
 impl TryFrom<&ast::CreateTable> for Table {
     type Error = Error;
@@ -61,6 +63,8 @@ pub struct Column {
     pub name: ColumnName,
     pub data_type: DataType,
 }
+
+impl ValueEncoding for Column {}
 
 impl TryFrom<&ast::ColumnDef> for Column {
     type Error = Error;

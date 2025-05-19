@@ -37,6 +37,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
             // ast::Statement::Delete(stmt) => self.plan_delete(stmt),
             ast::Statement::Insert(stmt) => self.plan_insert(stmt),
             ast::Statement::Query(stmt) => self.plan_select(stmt),
+            // ast::Statement::List(stmt) => self.plan_list(stmt),
             stmt => Err(Error::NotYetSupported(stmt.to_string())),
         }
     }

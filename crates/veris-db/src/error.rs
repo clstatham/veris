@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{num::TryFromIntError, path::PathBuf, string::FromUtf8Error, sync::PoisonError};
 
 use sqlparser::ast;
 use thiserror::Error;
@@ -8,7 +8,7 @@ use crate::types::{
     value::Value,
 };
 
-#[derive(Debug, Error, PartialEq, Clone)]
+#[derive(Debug, Error, PartialEq)]
 pub enum Error {
     #[error("Not in a transaction")]
     NotInTransaction,
@@ -50,8 +50,48 @@ pub enum Error {
     DirectoryAlreadyExists(PathBuf),
     #[error("Integer overflow")]
     IntegerOverflow,
+    #[error("Engine is in invalid state: {0}")]
+    InvalidEngineState(String),
+    #[error("Transaction is read-only")]
+    TransactionReadOnly,
+    #[error("Error in transaction order of operations")]
+    OutOfOrder,
+    #[error("Invalid UTF-8 string")]
+    InvalidUtf8,
 }
 
-pub fn io_error(error: std::io::Error) -> Error {
-    Error::Io(error.to_string())
+impl<T> From<PoisonError<T>> for Error {
+    fn from(_: PoisonError<T>) -> Self {
+        Error::PoisonedMutex
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Error::Io(error.to_string())
+    }
+}
+
+impl From<TryFromIntError> for Error {
+    fn from(_: TryFromIntError) -> Self {
+        Error::IntegerOverflow
+    }
+}
+
+impl From<FromUtf8Error> for Error {
+    fn from(_: FromUtf8Error) -> Self {
+        Error::InvalidUtf8
+    }
+}
+
+impl serde::ser::Error for Error {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Error::Serialization(msg.to_string())
+    }
+}
+
+impl serde::de::Error for Error {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Error::Serialization(msg.to_string())
+    }
 }

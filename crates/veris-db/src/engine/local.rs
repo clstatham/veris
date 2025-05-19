@@ -1,14 +1,10 @@
-use std::{
-    borrow::Cow,
-    ops::Bound,
-    sync::{Arc, Mutex, MutexGuard},
-};
+use std::borrow::Cow;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    encoding::{decode, encode},
+    encoding::{KeyEncoding, ValueEncoding},
     error::Error,
     exec::expr::Expr,
     storage::engine::StorageEngine,
@@ -18,7 +14,10 @@ use crate::{
     },
 };
 
-use super::{Catalog, Engine, Transaction};
+use super::{
+    Catalog, Engine, Transaction,
+    mvcc::{Mvcc, MvccTransaction},
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Key<'a> {
@@ -26,18 +25,21 @@ pub enum Key<'a> {
     Row(Cow<'a, TableName>, Cow<'a, Value>),
 }
 
+impl<'a> KeyEncoding<'a> for Key<'a> {}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum KeyPrefix<'a> {
     Table,
     Row(Cow<'a, TableName>),
 }
 
-#[derive(Default)]
-pub struct Local<E: StorageEngine + 'static>(Arc<Mutex<E>>);
+impl<'a> KeyEncoding<'a> for KeyPrefix<'a> {}
 
-impl<E: StorageEngine + 'static> Local<E> {
+pub struct Local<E: StorageEngine>(Mvcc<E>);
+
+impl<E: StorageEngine> Local<E> {
     pub fn new(engine: E) -> Self {
-        Self(Arc::new(Mutex::new(engine)))
+        Self(Mvcc::new(engine))
     }
 }
 
@@ -45,119 +47,89 @@ impl<'a, E: StorageEngine + 'static> Engine<'a> for Local<E> {
     type Transaction = LocalTransaction<E>;
 
     fn begin(&'a self) -> Result<Self::Transaction, Error> {
-        Ok(LocalTransaction {
-            engine: Local(self.0.clone()),
-        })
+        Ok(LocalTransaction(self.0.begin()?))
     }
 }
 
-pub struct LocalTransaction<E: StorageEngine + 'static> {
-    engine: Local<E>,
-}
+pub struct LocalTransaction<E: StorageEngine>(MvccTransaction<E>);
 
-impl<E: StorageEngine + 'static> LocalTransaction<E> {
-    pub fn lock_storage(&self) -> MutexGuard<'_, E> {
-        #[allow(clippy::unwrap_used)]
-        self.engine
-            .0
-            .lock()
-            .map_err(|_| Error::PoisonedMutex)
-            .unwrap()
-    }
-}
-
-impl<E: StorageEngine + 'static> Catalog for LocalTransaction<E> {
+impl<E: StorageEngine> Catalog for LocalTransaction<E> {
     fn create_table(&self, table: Table) -> Result<(), Error> {
-        let mut storage = self.lock_storage();
-        let table_key = encode(&Key::Table(Cow::Borrowed(&table.name)))?;
-        if storage.get(&table_key)?.is_some() {
+        let table_key = Key::Table(Cow::Borrowed(&table.name)).encode()?;
+        if self.0.get(&table_key)?.is_some() {
             return Err(Error::TableAlreadyExists(table.name.clone()));
         }
-        let table_value = encode(&table)?;
-        storage.set(&table_key, table_value.into_boxed_slice())?;
+        let table_value = table.encode()?;
+        self.0.set(&table_key, table_value)?;
         Ok(())
     }
 
     fn drop_table(&self, table: &TableName) -> Result<(), Error> {
-        let mut storage = self.lock_storage();
-        let table_key = encode(&Key::Table(Cow::Borrowed(table)))?;
-        if storage.get(&table_key)?.is_none() {
+        let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
+        if self.0.get(&table_key)?.is_none() {
             return Err(Error::TableAlreadyExists(table.clone()));
         }
 
         // delete the table schema
-        storage.delete(&table_key)?;
+        self.0.delete(&table_key)?;
 
         // delete the rows
-        let prefix = encode(&KeyPrefix::Row(Cow::Borrowed(table)))?;
-        let elems = storage
-            .scan_prefix(prefix.into_boxed_slice())
+        let prefix = KeyPrefix::Row(Cow::Borrowed(table)).encode()?;
+        let elems = self
+            .0
+            .scan_prefix(&prefix)?
             .map_ok(|r| r.0.to_vec())
             .collect_vec();
         for key in elems {
-            storage.delete(&key?)?;
+            self.0.delete(&key?)?;
         }
 
         Ok(())
     }
 
     fn get_table(&self, table: &TableName) -> Result<Option<Table>, Error> {
-        let mut storage = self.lock_storage();
-        let table_key = encode(&Key::Table(Cow::Borrowed(table)))?;
-        if let Some(table_value) = storage.get(&table_key)? {
-            let table: Table = decode(&table_value)?;
+        let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
+        if let Some(table_value) = self.0.get(&table_key)? {
+            let table = Table::decode(&table_value)?;
             return Ok(Some(table));
         }
         Ok(None)
     }
 
-    fn list_tables(&self) -> Result<impl Iterator<Item = Table>, Error> {
-        let mut engine = self.lock_storage();
-        let prefix = encode(&KeyPrefix::Table)?;
-        let elems = engine
-            .scan_prefix(prefix.into_boxed_slice())
-            .collect::<Vec<_>>();
-        let tables = elems
-            .into_iter()
-            .filter_map(|elem| {
-                let (_, value) = elem.ok()?;
-                if let Ok(table) = decode::<Table>(&value) {
-                    return Some(table);
-                }
-                None
-            })
-            .collect::<Vec<_>>();
-        Ok(tables.into_iter())
+    fn list_tables(&self) -> Result<Vec<Table>, Error> {
+        let prefix = KeyPrefix::Table.encode()?;
+        self.0
+            .scan_prefix(&prefix)?
+            .map(|r| r.and_then(|(_, v)| Table::decode(&v)))
+            .try_collect()
     }
 }
 
 impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
     fn commit(self) -> Result<(), Error> {
-        let mut storage = self.lock_storage();
-        storage.flush()?;
+        self.0.commit()?;
         Ok(())
     }
 
     fn rollback(self) -> Result<(), Error> {
+        self.0.rollback()?;
         Ok(())
     }
 
     fn delete(&self, table: &TableName, ids: &[Value]) -> Result<(), Error> {
-        let mut storage = self.lock_storage();
         for id in ids {
-            let key = encode(&Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)))?;
-            storage.delete(&key)?;
+            let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
+            self.0.delete(&key)?;
         }
         Ok(())
     }
 
     fn get(&self, table: &TableName, ids: &[Value]) -> Result<Box<[Row]>, Error> {
-        let mut storage = self.lock_storage();
         let mut rows = Vec::new();
         for id in ids {
-            let key = encode(&Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)))?;
-            if let Some(value) = storage.get(&key)? {
-                let row: Row = decode(&value)?;
+            let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
+            if let Some(value) = self.0.get(&key)? {
+                let row = Row::decode(&value)?;
                 rows.push(row);
             }
         }
@@ -168,30 +140,23 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
         let table = self
             .get_table(table)?
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
-        let mut storage = self.lock_storage();
         for row in rows {
             let id = &row[*table.primary_key_index];
 
-            let key = encode(&Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)))?;
-            let value = encode(&row)?;
-            storage.set(&key, value.into_boxed_slice())?;
+            let key = Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)).encode()?;
+            let value = row.encode()?;
+            self.0.set(&key, value)?;
         }
         Ok(())
     }
 
     fn scan(&self, table: &TableName, filter: Option<Expr>) -> Result<Rows, Error> {
-        // let mut storage = self.lock_storage();
-        let key = encode(&KeyPrefix::Row(Cow::Borrowed(table)))?;
-        // let rows = storage
-        //     .scan_prefix(key.into_boxed_slice())
-        //     .map(|res| res.and_then(|(_, value)| decode(&value)));
+        let key = KeyPrefix::Row(Cow::Borrowed(table)).encode()?;
+        let rows = self
+            .0
+            .scan_prefix(&key)?
+            .map(|res| res.and_then(|(_, value)| Row::decode(&value)));
 
-        let rows = LocalScanIterator::new(
-            self,
-            Bound::Included(key.into_boxed_slice()),
-            Bound::Unbounded,
-        )
-        .map(|res| res.and_then(|(_, value)| decode(&value)));
         let Some(filter) = filter else {
             return Ok(Box::new(rows));
         };
@@ -204,42 +169,5 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             .transpose()
         });
         Ok(Box::new(rows))
-    }
-}
-
-struct LocalScanIterator<E: StorageEngine + 'static> {
-    txn: LocalTransaction<E>,
-    start: Bound<Box<[u8]>>,
-    end: Bound<Box<[u8]>>,
-}
-
-impl<'a, E: StorageEngine + 'static> LocalScanIterator<E> {
-    fn new(txn: &'a LocalTransaction<E>, start: Bound<Box<[u8]>>, end: Bound<Box<[u8]>>) -> Self {
-        Self {
-            txn: LocalTransaction {
-                engine: Local(txn.engine.0.clone()),
-            },
-            start,
-            end,
-        }
-    }
-}
-
-impl<E: StorageEngine + 'static> Iterator for LocalScanIterator<E> {
-    type Item = Result<(Box<[u8]>, Box<[u8]>), Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut storage = self.txn.lock_storage();
-        let mut range = storage.scan((self.start.clone(), self.end.clone()));
-        let value = range.next()?;
-        Some(value.map(|(k, v)| {
-            self.start = match self.start {
-                Bound::Included(_) => Bound::Excluded(k.clone()),
-                Bound::Excluded(_) => Bound::Excluded(k.clone()),
-                Bound::Unbounded => Bound::Unbounded,
-            };
-
-            (k, v)
-        }))
     }
 }

@@ -19,6 +19,27 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub fn build(expr: &ast::Expr, scope: &Scope) -> Result<Self, Error> {
+        match expr {
+            ast::Expr::Value(v) => Ok(Expr::Constant(Value::try_from(&v.value)?)),
+            ast::Expr::BinaryOp { left, op, right } => {
+                let lhs = Box::new(Expr::build(left, scope)?);
+                let rhs = Box::new(Expr::build(right, scope)?);
+                match op {
+                    ast::BinaryOperator::Eq => Ok(Expr::Equal(lhs, rhs)),
+                    _ => Err(Error::NotYetSupported(expr.to_string())),
+                }
+            }
+            ast::Expr::Identifier(ident) => {
+                let column = scope
+                    .get_columm_index(None, &ColumnName::new(ident.value.clone()))
+                    .ok_or(Error::ColumnNotFound(ident.value.clone()))?;
+                Ok(Expr::Column(column))
+            }
+            _ => Err(Error::NotYetSupported(expr.to_string())),
+        }
+    }
+
     pub fn evaluate(&self, row: Option<&Row>) -> Result<Value, Error> {
         match self {
             Expr::Constant(value) => Ok(value.clone()),
@@ -41,26 +62,6 @@ impl Expr {
                 }
             }
             Expr::Ident(ident) => Ok(Value::String(ident.clone())),
-        }
-    }
-
-    pub fn build(expr: &ast::Expr, scope: &Scope) -> Result<Self, Error> {
-        match expr {
-            ast::Expr::Value(v) => Ok(Expr::Constant(Value::try_from(&v.value)?)),
-            ast::Expr::BinaryOp { left, op, right } => match op {
-                ast::BinaryOperator::Eq => Ok(Expr::Equal(
-                    Box::new(Expr::build(left, scope)?),
-                    Box::new(Expr::build(right, scope)?),
-                )),
-                _ => Err(Error::NotYetSupported(expr.to_string())),
-            },
-            ast::Expr::Identifier(ident) => {
-                let column = scope
-                    .get_columm_index(None, &ColumnName::new(ident.value.clone()))
-                    .ok_or(Error::ColumnNotFound(ident.value.clone()))?;
-                Ok(Expr::Column(column))
-            }
-            _ => Err(Error::NotYetSupported(expr.to_string())),
         }
     }
 }

@@ -138,7 +138,7 @@ impl Client {
         };
         let req = match first {
             ".q" => return Ok(ControlFlow::Exit),
-            ".?" => Request::Debug(line.split_whitespace().skip(1).collect()),
+            ".?" => Request::Debug(line[3..].to_string()),
             _ => Request::Execute(line.lines().collect()),
         };
         let req = serde_json::to_string(&req)?;

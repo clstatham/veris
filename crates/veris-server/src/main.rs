@@ -13,6 +13,8 @@ pub mod server;
 #[derive(Debug, ClapSerde, Serialize, Deserialize)]
 #[command(author, version, about)]
 pub struct Config {
+    db_path: PathBuf,
+
     #[default(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1234)))]
     addr: SocketAddr,
 }

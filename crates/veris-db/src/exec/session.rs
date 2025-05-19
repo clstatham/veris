@@ -4,9 +4,12 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
 use crate::{
-    engine::{Engine, Transaction},
+    engine::{Catalog, Engine, Transaction},
     error::Error,
-    types::{schema::TableName, value::Row},
+    types::{
+        schema::{Table, TableName},
+        value::Row,
+    },
 };
 
 use super::{ExecResult, plan::Planner};
@@ -19,6 +22,8 @@ pub enum StatementResult {
     Rollback,
     CreateTable(TableName),
     DropTable(TableName),
+    #[display("{:?}", 0)]
+    ShowTables(Vec<Table>),
     Delete(usize),
     Insert(usize),
     #[display("{:?}", rows)]
@@ -68,6 +73,10 @@ impl<'a, E: Engine<'a>> Session<'a, E> {
             ast::Statement::Rollback { .. } => {
                 self.rollback()?;
                 Ok(StatementResult::Rollback)
+            }
+            ast::Statement::ShowTables { .. } => {
+                let tables = self.with_transaction(|t| t.list_tables())?;
+                Ok(StatementResult::ShowTables(tables))
             }
             statement => self
                 .with_transaction(|t| Planner::new(t).plan(statement)?.execute(t))?

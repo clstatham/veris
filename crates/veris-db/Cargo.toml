@@ -12,4 +12,5 @@ log = {workspace = true}
 dyn-clone = "1.0.19"
 itertools = "0.14.0"
 bincode = { version = "2.0.1", features = ["serde"] }
+serde_bytes = "0.11.17"
 

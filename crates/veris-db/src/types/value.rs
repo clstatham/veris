@@ -4,7 +4,7 @@ use derive_more::{Deref, DerefMut, Display, From};
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
-use crate::error::Error;
+use crate::{encoding::ValueEncoding, error::Error};
 
 use super::schema::{ColumnName, TableName};
 
@@ -43,6 +43,8 @@ pub enum Value {
     Float(f64),
     String(String),
 }
+
+impl ValueEncoding for Value {}
 
 impl Value {
     pub fn data_type(&self) -> Option<DataType> {
@@ -161,6 +163,8 @@ impl TryFrom<&ast::Value> for Value {
 )]
 #[display("{:?}", self.0)]
 pub struct Row(Box<[Value]>);
+
+impl ValueEncoding for Row {}
 
 impl FromIterator<Value> for Row {
     fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {

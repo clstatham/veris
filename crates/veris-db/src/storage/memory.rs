@@ -1,5 +1,3 @@
-#![allow(clippy::type_complexity)]
-
 use std::{
     collections::BTreeMap,
     ops::Bound,
@@ -41,17 +39,11 @@ impl StorageEngine for Memory {
     }
 
     fn scan(&mut self, range: impl std::ops::RangeBounds<Box<[u8]>>) -> Self::ScanIterator<'_> {
-        let start = match range.start_bound() {
-            Bound::Included(start) => Bound::Included(start.clone()),
-            Bound::Excluded(start) => Bound::Excluded(start.clone()),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(end) => Bound::Included(end.clone()),
-            Bound::Excluded(end) => Bound::Excluded(end.clone()),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        MemoryScanIterator::new(Memory(self.0.clone()), start, end)
+        MemoryScanIterator::new(
+            Memory(self.0.clone()),
+            range.start_bound().cloned(),
+            range.end_bound().cloned(),
+        )
     }
 
     fn delete(&mut self, key: &[u8]) -> Result<(), Error> {

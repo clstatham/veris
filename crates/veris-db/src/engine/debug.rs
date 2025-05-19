@@ -38,9 +38,9 @@ impl Catalog for DebugTransaction {
         Ok(None)
     }
 
-    fn list_tables(&self) -> Result<impl Iterator<Item = Table>, Error> {
+    fn list_tables(&self) -> Result<Vec<Table>, Error> {
         log::debug!("list_tables()");
-        Ok(std::iter::empty())
+        Ok(vec![])
     }
 }
 

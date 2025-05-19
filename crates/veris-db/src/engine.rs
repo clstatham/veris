@@ -13,6 +13,7 @@ use crate::{
 
 pub mod debug;
 pub mod local;
+pub mod mvcc;
 
 wrap! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Display)]
@@ -23,7 +24,7 @@ pub trait Catalog {
     fn create_table(&self, table: Table) -> Result<(), Error>;
     fn drop_table(&self, table: &TableName) -> Result<(), Error>;
     fn get_table(&self, table: &TableName) -> Result<Option<Table>, Error>;
-    fn list_tables(&self) -> Result<impl Iterator<Item = Table>, Error>;
+    fn list_tables(&self) -> Result<Vec<Table>, Error>;
 }
 
 pub trait Transaction: Catalog {

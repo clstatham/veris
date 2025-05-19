@@ -21,10 +21,9 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            engine: Local::new(Engine::new("./data/db1").unwrap()),
-        }
+        log::info!("Loading database at {}", config.db_path.display());
+        let engine = Local::new(Engine::new(&config.db_path).unwrap());
+        Self { config, engine }
     }
 
     pub async fn serve(self) -> anyhow::Result<()> {
