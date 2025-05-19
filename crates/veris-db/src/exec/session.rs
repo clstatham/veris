@@ -1,5 +1,3 @@
-use derive_more::Display;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
@@ -8,13 +6,13 @@ use crate::{
     error::Error,
     types::{
         schema::{Table, TableName},
-        value::Row,
+        value::{ColumnLabel, Row},
     },
 };
 
-use super::{ExecResult, plan::Planner};
+use super::plan::Planner;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Display)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum StatementResult {
     Null,
     Begin,
@@ -22,29 +20,15 @@ pub enum StatementResult {
     Rollback,
     CreateTable(TableName),
     DropTable(TableName),
-    #[display("{:?}", 0)]
-    ShowTables(Vec<Table>),
+    ShowTables {
+        tables: Vec<Table>,
+    },
     Delete(usize),
     Insert(usize),
-    #[display("{:?}", rows)]
     Select {
         rows: Vec<Row>,
+        columns: Vec<ColumnLabel>,
     },
-}
-
-impl TryFrom<ExecResult> for StatementResult {
-    type Error = Error;
-
-    fn try_from(result: ExecResult) -> Result<Self, Self::Error> {
-        match result {
-            ExecResult::Null => Ok(StatementResult::Begin),
-            ExecResult::Table(name) => Ok(StatementResult::CreateTable(name)),
-            ExecResult::Rows(rows) => Ok(StatementResult::Select {
-                rows: rows.into_iter().try_collect()?,
-            }),
-            ExecResult::Count(count) => Ok(StatementResult::Insert(count)),
-        }
-    }
 }
 
 pub struct Session<'a, E: Engine<'a>> {
@@ -76,11 +60,9 @@ impl<'a, E: Engine<'a>> Session<'a, E> {
             }
             ast::Statement::ShowTables { .. } => {
                 let tables = self.with_transaction(|t| t.list_tables())?;
-                Ok(StatementResult::ShowTables(tables))
+                Ok(StatementResult::ShowTables { tables })
             }
-            statement => self
-                .with_transaction(|t| Planner::new(t).plan(statement)?.execute(t))?
-                .try_into(),
+            statement => self.with_transaction(|t| Planner::new(t).plan(statement)?.execute(t)),
         }
     }
 

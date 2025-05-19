@@ -7,17 +7,17 @@ use crate::{
     encoding::{KeyEncoding, ValueEncoding},
     error::Error,
     exec::expr::Expr,
-    storage::engine::StorageEngine,
+    storage::{
+        engine::StorageEngine,
+        mvcc::{Mvcc, MvccTransaction},
+    },
     types::{
         schema::{Table, TableName},
         value::{Row, Rows, Value},
     },
 };
 
-use super::{
-    Catalog, Engine, Transaction,
-    mvcc::{Mvcc, MvccTransaction},
-};
+use super::{Catalog, Engine, Transaction};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Key<'a> {
@@ -53,55 +53,14 @@ impl<'a, E: StorageEngine + 'static> Engine<'a> for Local<E> {
 
 pub struct LocalTransaction<E: StorageEngine>(MvccTransaction<E>);
 
-impl<E: StorageEngine> Catalog for LocalTransaction<E> {
-    fn create_table(&self, table: Table) -> Result<(), Error> {
-        let table_key = Key::Table(Cow::Borrowed(&table.name)).encode()?;
-        if self.0.get(&table_key)?.is_some() {
-            return Err(Error::TableAlreadyExists(table.name.clone()));
-        }
-        let table_value = table.encode()?;
-        self.0.set(&table_key, table_value)?;
-        Ok(())
-    }
-
-    fn drop_table(&self, table: &TableName) -> Result<(), Error> {
-        let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
-        if self.0.get(&table_key)?.is_none() {
-            return Err(Error::TableAlreadyExists(table.clone()));
-        }
-
-        // delete the table schema
-        self.0.delete(&table_key)?;
-
-        // delete the rows
-        let prefix = KeyPrefix::Row(Cow::Borrowed(table)).encode()?;
-        let elems = self
-            .0
-            .scan_prefix(&prefix)?
-            .map_ok(|r| r.0.to_vec())
-            .collect_vec();
-        for key in elems {
-            self.0.delete(&key?)?;
-        }
-
-        Ok(())
-    }
-
-    fn get_table(&self, table: &TableName) -> Result<Option<Table>, Error> {
-        let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
-        if let Some(table_value) = self.0.get(&table_key)? {
-            let table = Table::decode(&table_value)?;
-            return Ok(Some(table));
+impl<E: StorageEngine> LocalTransaction<E> {
+    pub fn get_row(&self, table: &TableName, id: &Value) -> Result<Option<Row>, Error> {
+        let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
+        if let Some(value) = self.0.get(&key)? {
+            let row = Row::decode(&value)?;
+            return Ok(Some(row));
         }
         Ok(None)
-    }
-
-    fn list_tables(&self) -> Result<Vec<Table>, Error> {
-        let prefix = KeyPrefix::Table.encode()?;
-        self.0
-            .scan_prefix(&prefix)?
-            .map(|r| r.and_then(|(_, v)| Table::decode(&v)))
-            .try_collect()
     }
 }
 
@@ -117,23 +76,21 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
     }
 
     fn delete(&self, table: &TableName, ids: &[Value]) -> Result<(), Error> {
+        let table = self
+            .get_table(table)?
+            .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
+
         for id in ids {
-            let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
+            let key = Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)).encode()?;
             self.0.delete(&key)?;
         }
         Ok(())
     }
 
     fn get(&self, table: &TableName, ids: &[Value]) -> Result<Box<[Row]>, Error> {
-        let mut rows = Vec::new();
-        for id in ids {
-            let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
-            if let Some(value) = self.0.get(&key)? {
-                let row = Row::decode(&value)?;
-                rows.push(row);
-            }
-        }
-        Ok(rows.into_boxed_slice())
+        ids.iter()
+            .filter_map(|id| self.get_row(table, id).transpose())
+            .collect()
     }
 
     fn insert(&self, table: &TableName, rows: Box<[Row]>) -> Result<(), Error> {
@@ -169,5 +126,102 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             .transpose()
         });
         Ok(Box::new(rows))
+    }
+}
+
+impl<E: StorageEngine> Catalog for LocalTransaction<E> {
+    fn create_table(&self, table: Table) -> Result<(), Error> {
+        let table_key = Key::Table(Cow::Borrowed(&table.name)).encode()?;
+        if self.0.get(&table_key)?.is_some() {
+            return Err(Error::TableAlreadyExists(table.name.clone()));
+        }
+        let table_value = table.encode()?;
+        self.0.set(&table_key, table_value)?;
+        Ok(())
+    }
+
+    fn drop_table(&self, table: &TableName) -> Result<(), Error> {
+        let Some(table) = self.get_table(table)? else {
+            return Err(Error::TableDoesNotExist(table.to_owned()));
+        };
+
+        // delete the table schema
+        self.0
+            .delete(&Key::Table(Cow::Borrowed(&table.name)).encode()?)?;
+
+        // delete the rows
+        let prefix = KeyPrefix::Row(Cow::Borrowed(&table.name)).encode()?;
+        let elems: Vec<_> = self
+            .0
+            .scan_prefix(&prefix)?
+            .map_ok(|r| r.0.to_vec())
+            .try_collect()?;
+        for key in elems {
+            self.0.delete(&key)?;
+        }
+
+        Ok(())
+    }
+
+    fn get_table(&self, table: &TableName) -> Result<Option<Table>, Error> {
+        let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
+        if let Some(table_value) = self.0.get(&table_key)? {
+            let table = Table::decode(&table_value)?;
+            return Ok(Some(table));
+        }
+        Ok(None)
+    }
+
+    fn list_tables(&self) -> Result<Vec<Table>, Error> {
+        let prefix = KeyPrefix::Table.encode()?;
+        self.0
+            .scan_prefix(&prefix)?
+            .map(|r| r.and_then(|(_, v)| Table::decode(&v)))
+            .try_collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{storage::memory::Memory, types::schema::ColumnIndex};
+
+    #[test]
+    fn test_local_engine() {
+        let engine = Local::new(Memory::default());
+        let txn = engine.begin().unwrap();
+        let table = Table {
+            name: TableName::new("test".to_string()),
+            primary_key_index: ColumnIndex::new(0),
+            columns: vec![],
+        };
+        txn.create_table(table).unwrap();
+        txn.commit().unwrap();
+
+        let txn = engine.begin().unwrap();
+        let tables = txn.list_tables().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, TableName::new("test".to_string()));
+        txn.commit().unwrap();
+
+        let txn = engine.begin().unwrap();
+        let table = txn.get_table(&TableName::new("test".to_string())).unwrap();
+        assert!(table.is_some());
+        let table = table.unwrap();
+        assert_eq!(table.name, TableName::new("test".to_string()));
+        assert_eq!(table.primary_key_index, ColumnIndex::new(0));
+        assert_eq!(table.columns.len(), 0);
+        txn.drop_table(&TableName::new("test".to_string())).unwrap();
+        txn.commit().unwrap();
+
+        let txn = engine.begin().unwrap();
+        let table = txn.get_table(&TableName::new("test".to_string())).unwrap();
+        assert!(table.is_none());
+        txn.commit().unwrap();
+
+        let txn = engine.begin().unwrap();
+        let tables = txn.list_tables().unwrap();
+        assert_eq!(tables.len(), 0);
+        txn.commit().unwrap();
     }
 }

@@ -16,17 +16,18 @@ use serde::{
 
 use crate::error::Error;
 
-const BINCODE_CONFIG: Configuration<BigEndian, Fixint, NoLimit> =
-    standard().with_big_endian().with_fixed_int_encoding();
+fn bincode_config() -> impl Config {
+    standard().with_big_endian().with_fixed_int_encoding()
+}
 
 pub fn bincode_serialize(value: &impl Serialize) -> Result<Box<[u8]>, Error> {
-    bincode::serde::encode_to_vec(value, BINCODE_CONFIG)
+    bincode::serde::encode_to_vec(value, bincode_config())
         .map_err(|e| Error::Serialization(e.to_string()))
         .map(Into::into)
 }
 
 pub fn bincode_deserialize<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, Error> {
-    bincode::serde::borrow_decode_from_slice(bytes, BINCODE_CONFIG)
+    bincode::serde::borrow_decode_from_slice(bytes, bincode_config())
         .map(|(t, _)| t)
         .map_err(|e| Error::Serialization(e.to_string()))
 }

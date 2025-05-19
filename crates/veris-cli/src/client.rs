@@ -3,9 +3,11 @@ use std::{
     net::TcpStream,
 };
 
+use ascii_table::{Align, AsciiTable};
 use rustyline::{Editor, error::ReadlineError, history::FileHistory};
 use sqlparser::parser::ParserError;
 use thiserror::Error;
+use veris_db::exec::session::StatementResult;
 use veris_net::request::{Request, Response};
 
 use crate::Config;
@@ -77,9 +79,63 @@ impl Client {
                             }
                             ControlFlow::Continue => {}
                             ControlFlow::Response(resp) => match resp {
-                                Response::Execute(resp) => {
-                                    println!("{resp}");
-                                }
+                                Response::Execute(resp) => match resp {
+                                    StatementResult::ShowTables { tables } => {
+                                        for table in tables {
+                                            let mut ascii_table = AsciiTable::default();
+                                            let mut data = Vec::new();
+                                            for (i, column) in table.columns.iter().enumerate() {
+                                                ascii_table
+                                                    .column(i)
+                                                    .set_header(&*column.name)
+                                                    .set_align(Align::Right);
+                                                data.push(format!("{}", &column.data_type));
+                                            }
+                                            println!("Table: {}", table.name);
+                                            ascii_table.print(vec![data]);
+                                        }
+                                    }
+                                    StatementResult::Select { rows, columns } => {
+                                        let mut ascii_table = AsciiTable::default();
+                                        for (i, column) in columns.iter().enumerate() {
+                                            ascii_table
+                                                .column(i)
+                                                .set_header(column.to_string())
+                                                .set_align(Align::Right);
+                                        }
+                                        let mut data = Vec::new();
+                                        for row in rows {
+                                            let mut inner = Vec::new();
+                                            for item in row {
+                                                inner.push(item);
+                                            }
+                                            data.push(inner);
+                                        }
+                                        ascii_table.print(data);
+                                    }
+                                    StatementResult::Insert(count) => {
+                                        println!("Inserted {count} rows");
+                                    }
+                                    StatementResult::Delete(count) => {
+                                        println!("Deleted {count} rows");
+                                    }
+                                    StatementResult::Begin => {
+                                        println!("Transaction started");
+                                    }
+                                    StatementResult::Commit => {
+                                        println!("Transaction committed");
+                                    }
+                                    StatementResult::Rollback => {
+                                        println!("Transaction rolled back");
+                                    }
+                                    StatementResult::CreateTable(name) => {
+                                        println!("Created table {name}");
+                                    }
+                                    StatementResult::DropTable(name) => {
+                                        println!("Dropped table {name}");
+                                    }
+                                    StatementResult::Null => {}
+                                },
                                 Response::Error(resp) => {
                                     println!("Error: {resp}")
                                 }

@@ -188,14 +188,21 @@ impl<T: Iterator<Item = Result<Row, Error>>> RowIter for T {}
 
 pub type Rows = Box<dyn RowIter>;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnLabel {
-    #[display("")]
     None,
-    #[display("{}", 0)]
     Unqualified(ColumnName),
-    #[display("{}.{}", 0, 1)]
     Qualified(TableName, ColumnName),
+}
+
+impl std::fmt::Display for ColumnLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ColumnLabel::None => write!(f, ""),
+            ColumnLabel::Unqualified(name) => write!(f, "{}", name),
+            ColumnLabel::Qualified(table, column) => write!(f, "{}.{}", table, column),
+        }
+    }
 }
 
 #[cfg(test)]

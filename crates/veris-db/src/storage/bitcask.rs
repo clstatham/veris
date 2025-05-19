@@ -28,7 +28,7 @@ impl Bitcask {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, Error> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        let filename = root.join("bitcask.db");
+        let filename = root.join("veris.db");
         let file = File::options()
             .create(true)
             .append(true)

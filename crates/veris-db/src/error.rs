@@ -8,7 +8,7 @@ use crate::types::{
     value::Value,
 };
 
-#[derive(Debug, Error, PartialEq)]
+#[derive(Debug, Error, PartialEq, Clone)]
 pub enum Error {
     #[error("Not in a transaction")]
     NotInTransaction,
@@ -58,6 +58,8 @@ pub enum Error {
     OutOfOrder,
     #[error("Invalid UTF-8 string")]
     InvalidUtf8,
+    #[error("Invalid SQL statement: {0}")]
+    InvalidSql(String),
 }
 
 impl<T> From<PoisonError<T>> for Error {

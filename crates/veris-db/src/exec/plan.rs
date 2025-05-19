@@ -9,7 +9,7 @@ use crate::{
     },
 };
 
-use super::{ExecResult, Executor, expr::Expr, scope::Scope};
+use super::{Executor, expr::Expr, scope::Scope, session::StatementResult};
 
 pub struct Planner<'a, C: Catalog> {
     catalog: &'a C,
@@ -94,7 +94,7 @@ pub enum Plan {
 }
 
 impl Plan {
-    pub fn execute(self, txn: &impl Transaction) -> Result<ExecResult, Error> {
+    pub fn execute(self, txn: &impl Transaction) -> Result<StatementResult, Error> {
         Executor::new(txn).execute(self)
     }
 }
@@ -172,6 +172,9 @@ impl Node {
 
     fn from_select(select: &ast::Select, catalog: &impl Catalog) -> Result<Self, Error> {
         let mut scope = Scope::default();
+        if select.from.is_empty() {
+            return Err(Error::InvalidSql(select.to_string()));
+        }
         let table_name = TableName::new(select.from[0].to_string());
         let table = catalog
             .get_table(&table_name)?

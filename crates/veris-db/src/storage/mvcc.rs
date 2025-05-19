@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     ops::{Bound, RangeBounds},
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -15,6 +15,8 @@ use crate::{
     error::Error,
     storage::engine::StorageEngine,
 };
+
+use super::engine::ScanIterator;
 
 pub type Version = u64;
 impl ValueEncoding for Version {}
@@ -46,7 +48,6 @@ pub enum Key<'a> {
 impl<'a> KeyEncoding<'a> for Key<'a> {}
 
 #[derive(Debug, Serialize, Deserialize)]
-#[repr(C)]
 pub enum KeyPrefix<'a> {
     NextVersion,
     ActiveTransaction,
@@ -290,72 +291,128 @@ impl<E: StorageEngine> MvccTransaction<E> {
             Bound::Unbounded => Bound::Excluded(KeyPrefix::Unversioned.encode()?),
         };
 
-        Ok(MvccScanIterator {
-            engine: self.engine.clone(),
-            state: self.state.clone(),
-            start,
-            end,
-        })
+        Ok(MvccScanIterator::new(
+            self.engine.clone(),
+            self.state.clone(),
+            (start, end),
+        ))
     }
 
     pub fn scan_prefix(&self, prefix: &[u8]) -> Result<MvccScanIterator<E>, Error> {
         let mut prefix = KeyPrefix::Version(Cow::Borrowed(prefix)).encode()?.to_vec();
         prefix.truncate(prefix.len() - 2);
         let range = key_prefix_range(&prefix);
-        let start = range.start_bound().cloned();
-        let end = range.end_bound().cloned();
-        Ok(MvccScanIterator {
-            engine: self.engine.clone(),
-            state: self.state.clone(),
-            start,
-            end,
-        })
+        Ok(MvccScanIterator::new(
+            self.engine.clone(),
+            self.state.clone(),
+            range,
+        ))
     }
 }
 
 pub struct MvccScanIterator<E: StorageEngine> {
     engine: Arc<Mutex<E>>,
     state: MvccTransactionState,
-    start: Bound<Box<[u8]>>,
-    end: Bound<Box<[u8]>>,
+    buffer: VecDeque<(Box<[u8]>, Box<[u8]>)>,
+    remainder: Option<(Bound<Box<[u8]>>, Bound<Box<[u8]>>)>,
 }
 
 impl<E: StorageEngine> MvccScanIterator<E> {
-    pub fn try_next(&mut self) -> Result<Option<(Box<[u8]>, Box<[u8]>)>, Error> {
+    const BUFFER_SIZE: usize = 32;
+
+    fn new(
+        engine: Arc<Mutex<E>>,
+        state: MvccTransactionState,
+        range: (Bound<Box<[u8]>>, Bound<Box<[u8]>>),
+    ) -> Self {
+        Self {
+            engine,
+            state,
+            buffer: VecDeque::with_capacity(Self::BUFFER_SIZE),
+            remainder: Some(range),
+        }
+    }
+
+    fn fill_buffer(&mut self) -> Result<(), Error> {
+        if self.buffer.len() >= Self::BUFFER_SIZE {
+            return Ok(());
+        }
+
+        let Some(range) = self.remainder.take() else {
+            return Ok(());
+        };
+        let range_end = range.1.clone();
+
         let mut storage = self.engine.lock()?;
-        let mut range = storage.scan((self.start.clone(), self.end.clone()));
-        let value = range.next().transpose()?;
-        if let Some((key, value)) = value {
-            match Key::decode(&key)? {
-                Key::Version(_, version) => {
-                    if !self.state.is_version_visible(version) {
-                        return Ok(None);
-                    }
-                }
-                key => {
-                    return Err(Error::InvalidEngineState(format!(
-                        "expected a Versioned key, got {key:?}"
-                    )));
-                }
+
+        let mut scan = VersionIterator::new(&self.state, storage.scan(range)).peekable();
+
+        while let Some((key, _, value)) = scan.next().transpose()? {
+            match scan.peek() {
+                Some(Ok((next, _, _))) if next == &key => continue,
+                Some(Err(e)) => return Err(e.clone()),
+                Some(Ok(_)) | None => {}
             }
             let Some(value) = bincode_deserialize(&value)? else {
-                return Ok(None);
+                continue;
             };
-            self.start = match self.start {
-                Bound::Included(_) => Bound::Excluded(key.clone()),
-                Bound::Excluded(_) => Bound::Excluded(key.clone()),
-                Bound::Unbounded => Bound::Unbounded,
-            };
+            self.buffer.push_back((key, value));
 
-            Ok(Some((key, value)))
-        } else {
-            Ok(None)
+            if self.buffer.len() == Self::BUFFER_SIZE {
+                if let Some((next, version, _)) = scan.next().transpose()? {
+                    let range_start =
+                        Bound::Included(Key::Version(Cow::Borrowed(&next), version).encode()?);
+                    self.remainder = Some((range_start, range_end));
+                }
+                return Ok(());
+            }
         }
+
+        Ok(())
     }
 }
 
 impl<E: StorageEngine> Iterator for MvccScanIterator<E> {
     type Item = Result<(Box<[u8]>, Box<[u8]>), Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.buffer.is_empty() {
+            if let Err(error) = self.fill_buffer() {
+                return Some(Err(error));
+            }
+        }
+        self.buffer.pop_front().map(Ok)
+    }
+}
+
+struct VersionIterator<'a, I: ScanIterator> {
+    txn: &'a MvccTransactionState,
+    inner: I,
+}
+
+impl<'a, I: ScanIterator> VersionIterator<'a, I> {
+    fn new(txn: &'a MvccTransactionState, inner: I) -> Self {
+        Self { txn, inner }
+    }
+
+    fn try_next(&mut self) -> Result<Option<(Box<[u8]>, Version, Box<[u8]>)>, Error> {
+        while let Some((key, value)) = self.inner.next().transpose()? {
+            let Key::Version(key, version) = Key::decode(&key)? else {
+                return Err(Error::InvalidEngineState(format!(
+                    "expected a Version key, got {key:?}"
+                )));
+            };
+            if !self.txn.is_version_visible(version) {
+                continue;
+            }
+            return Ok(Some((key.into_owned().into(), version, value)));
+        }
+        Ok(None)
+    }
+}
+
+impl<'a, I: ScanIterator> Iterator for VersionIterator<'a, I> {
+    type Item = Result<(Box<[u8]>, Version, Box<[u8]>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.try_next().transpose()

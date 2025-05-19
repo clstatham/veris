@@ -69,7 +69,6 @@ impl Server {
         let mut lines = rx.lines();
 
         while let Some(line) = lines.next_line().await? {
-            log::info!("Got line: {line}");
             let req = match serde_json::from_str(&line) {
                 Ok(req) => req,
                 Err(e) => {
@@ -78,7 +77,11 @@ impl Server {
                 }
             };
 
+            log::info!("Request: {req:?}");
+
             let resp = Self::process_request(&mut session, &req);
+
+            log::info!("Response: {resp:?}");
 
             let resp = format!("{}\n", serde_json::to_string(&resp)?);
             tx.write_all(resp.as_bytes()).await?;

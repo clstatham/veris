@@ -13,7 +13,6 @@ use crate::{
 
 pub mod debug;
 pub mod local;
-pub mod mvcc;
 
 wrap! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Display)]

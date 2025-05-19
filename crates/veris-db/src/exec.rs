@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use plan::{Node, Plan};
+use session::StatementResult;
 
 use crate::{
     engine::Transaction,
@@ -15,13 +16,6 @@ pub mod plan;
 pub mod scope;
 pub mod session;
 
-pub enum ExecResult {
-    Null,
-    Table(TableName),
-    Rows(Rows),
-    Count(usize),
-}
-
 pub struct Executor<'a, T: Transaction> {
     txn: &'a T,
 }
@@ -31,21 +25,21 @@ impl<'a, T: Transaction> Executor<'a, T> {
         Self { txn }
     }
 
-    pub fn execute(&mut self, plan: Plan) -> Result<ExecResult, Error> {
+    pub fn execute(&mut self, plan: Plan) -> Result<StatementResult, Error> {
         match plan {
             Plan::CreateTable(table) => {
                 let name = table.name.clone();
                 self.txn.create_table(table)?;
-                Ok(ExecResult::Table(name))
+                Ok(StatementResult::CreateTable(name))
             }
             Plan::DropTable(table) => {
                 self.txn.drop_table(&table)?;
-                Ok(ExecResult::Table(table))
+                Ok(StatementResult::DropTable(table))
             }
             Plan::Insert { table, source } => {
                 let source = self.execute_node(source)?;
                 let count = self.insert(table, source)?;
-                Ok(ExecResult::Count(count))
+                Ok(StatementResult::Insert(count))
             }
             Plan::Delete {
                 table,
@@ -54,11 +48,19 @@ impl<'a, T: Transaction> Executor<'a, T> {
             } => {
                 let source = self.execute_node(source)?;
                 let count = self.delete(table, primary_key, source)?;
-                Ok(ExecResult::Count(count))
+                Ok(StatementResult::Delete(count))
             }
             Plan::Select(node) => {
+                let mut columns = Vec::new();
+                for col in 0..node.num_columns() {
+                    columns.push(node.column_label(&ColumnIndex::new(col)));
+                }
                 let rows = self.execute_node(node)?;
-                Ok(ExecResult::Rows(rows))
+
+                Ok(StatementResult::Select {
+                    rows: rows.try_collect()?,
+                    columns,
+                })
             }
         }
     }

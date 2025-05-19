@@ -8,7 +8,7 @@ pub enum Request {
     Debug(String),
 }
 
-#[derive(Debug, Serialize, Deserialize, Display)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Execute(StatementResult),
     Debug(String),
