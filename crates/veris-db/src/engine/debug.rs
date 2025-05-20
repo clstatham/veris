@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
+
 use crate::{
     error::Error,
     exec::expr::Expr,
     types::{
-        schema::{Table, TableName},
+        schema::{ColumnName, Table, TableName},
         value::{Row, Rows, Value},
     },
 };
@@ -73,5 +75,15 @@ impl Transaction for DebugTransaction {
     fn scan(&self, table: &TableName, filter: Option<Expr>) -> Result<Rows, Error> {
         log::debug!("scan(): table={table:?}, filter={filter:?}");
         Ok(Box::new(std::iter::empty()))
+    }
+
+    fn lookup_index(
+        &self,
+        table: &TableName,
+        column: &ColumnName,
+        values: &[Value],
+    ) -> Result<BTreeSet<Value>, Error> {
+        log::debug!("lookup_index(): table={table:?}, column={column:?}, values={values:?}");
+        Ok(BTreeSet::new())
     }
 }

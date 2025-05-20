@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use join::{HashJoiner, NestedLoopJoiner};
 use plan::{Node, Plan};
 use session::StatementResult;
 
@@ -7,11 +8,12 @@ use crate::{
     error::Error,
     types::{
         schema::{ColumnIndex, Table, TableName},
-        value::{Rows, Value},
+        value::{Row, Rows, Value},
     },
 };
 
 pub mod expr;
+pub mod join;
 pub mod plan;
 pub mod scope;
 pub mod session;
@@ -66,6 +68,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
     }
 
     fn execute_node(&mut self, node: Node) -> Result<Rows, Error> {
+        dbg!(&node);
         match node {
             Node::Values { rows } => {
                 Ok(Box::new(rows.into_iter().map(|row| {
@@ -107,19 +110,53 @@ impl<'a, T: Transaction> Executor<'a, T> {
                         .collect()
                 })))
             }
+            Node::HashJoin {
+                left,
+                left_col: left_column,
+                right,
+                right_col: right_column,
+                outer,
+            } => {
+                let right_cols = right.num_columns();
+                let left = self.execute_node(*left)?;
+                let right = self.execute_node(*right)?;
+                Ok(Box::new(HashJoiner::new(
+                    left,
+                    left_column,
+                    right,
+                    right_column,
+                    right_cols,
+                    outer,
+                )?))
+            }
+            Node::NestedLoopJoin {
+                left,
+                right,
+                predicate,
+                outer,
+            } => {
+                let right_cols = right.num_columns();
+                let left = self.execute_node(*left)?;
+                let right = self.execute_node(*right)?;
+
+                Ok(Box::new(NestedLoopJoiner::new(
+                    left, right, right_cols, predicate, outer,
+                )))
+            }
         }
     }
 
     fn insert(&mut self, table: Table, mut source: Rows) -> Result<usize, Error> {
         let mut rows = Vec::new();
         while let Some(values) = source.next().transpose()? {
-            if values.len() == table.columns.len() {
-                rows.push(values);
-                continue;
+            if !table.validate_row(&values) {
+                return Err(Error::InvalidRow(table.name.clone()));
             }
-            if values.len() > table.columns.len() {
-                return Err(Error::TooManyValues(table.name.clone()));
+            let mut casted_row = Vec::new();
+            for (i, value) in values.iter().enumerate() {
+                casted_row.push(value.try_cast(&table.columns[i].data_type)?);
             }
+            rows.push(Row::from(casted_row.into_boxed_slice()));
         }
 
         let count = rows.len();

@@ -10,7 +10,7 @@ pub enum Request {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Execute(StatementResult),
+    Execute(Vec<StatementResult>),
     Debug(String),
     Error(String),
 }

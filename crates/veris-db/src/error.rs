@@ -4,8 +4,8 @@ use sqlparser::ast;
 use thiserror::Error;
 
 use crate::types::{
-    schema::{ColumnIndex, TableName},
-    value::Value,
+    schema::{ColumnIndex, ColumnName, TableName},
+    value::{ColumnLabel, DataType, Row, Value},
 };
 
 #[derive(Debug, Error, PartialEq, Clone)]
@@ -14,16 +14,16 @@ pub enum Error {
     NotInTransaction,
     #[error("Transaction already in progress")]
     AlreadyInTransaction,
-    #[error("Table {0} already exists")]
+    #[error("Table already exists: {0}")]
     TableAlreadyExists(TableName),
-    #[error("Table {0} does not exist")]
+    #[error("Table does not exist: {0}")]
     TableDoesNotExist(TableName),
     #[error("Row not found")]
     RowNotFound,
     #[error("Column {0} not found")]
     ColumnNotFound(String),
-    #[error("Invalid column index: {0}")]
-    InvalidColumnIndex(ColumnIndex),
+    #[error("Invalid column index: {0} for row: {1}")]
+    InvalidColumnIndex(ColumnIndex, Row),
     #[error("Invalid data type: {0}")]
     InvalidDataType(ast::DataType),
     #[error("Invalid value: {0}")]
@@ -32,13 +32,15 @@ pub enum Error {
     InvalidPrimaryKey(Box<ast::Expr>),
     #[error("Row is in invalid state")]
     InvalidRowState,
+    #[error("Invalid row for table: {0}")]
+    InvalidRow(TableName),
     #[error("Invalid filter: {0}")]
     InvalidFilterResult(Value),
     #[error("Row has too many values for table {0}")]
     TooManyValues(TableName),
     #[error("Error converting from AST: {0}")]
     FromAstError(String),
-    #[error("`{0}` not yet supported")]
+    #[error("Not yet supported: {0}")]
     NotYetSupported(String),
     #[error("Poisoned mutex")]
     PoisonedMutex,
@@ -60,6 +62,18 @@ pub enum Error {
     InvalidUtf8,
     #[error("Invalid SQL statement: {0}")]
     InvalidSql(String),
+    #[error("Invalid date: {0}")]
+    InvalidDate(String),
+    #[error("No current table in scope")]
+    NoCurrentTable,
+    #[error("Invalid cast: {0} to {1}")]
+    InvalidCast(Value, DataType),
+    #[error("Duplicate table: {0}")]
+    DuplicateTable(TableName),
+    #[error("Duplicate column: {0}")]
+    DuplicateColumn(ColumnLabel),
+    #[error("Row referenced by {0}.{1} = {2}")]
+    ReferentialIntegrity(TableName, ColumnName, Value),
 }
 
 impl<T> From<PoisonError<T>> for Error {

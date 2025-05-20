@@ -111,20 +111,28 @@ impl Server {
                     }
                 };
 
-                let mut result = StatementResult::Null;
+                let mut results = Vec::new();
                 for statement in &ast {
                     match session.exec(statement) {
                         Ok(val) => {
-                            result = val;
+                            results.push(val);
                         }
                         Err(e) => {
                             log::error!("Failed to execute SQL: {}", e);
-                            return Response::Error(e.to_string());
+                            if let Err(e) = session.rollback() {
+                                log::error!("Failed to rollback: {}", e);
+                            } else {
+                                log::info!("Rolled back transaction");
+                                results.push(StatementResult::Rollback);
+                            }
+
+                            results.push(StatementResult::Error(e.to_string()));
+                            return Response::Execute(results);
                         }
                     }
                 }
 
-                Response::Execute(result)
+                Response::Execute(results)
             }
         }
     }

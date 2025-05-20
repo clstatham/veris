@@ -1,6 +1,8 @@
 use std::hash::Hash;
 
+use chrono::NaiveDate;
 use derive_more::{Deref, DerefMut, Display, From};
+use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
@@ -8,16 +10,19 @@ use crate::{encoding::ValueEncoding, error::Error};
 
 use super::schema::{ColumnName, TableName};
 
-#[derive(Clone, Copy, Debug, PartialEq, Hash, Serialize, Deserialize, Display)]
+#[derive(Clone, Copy, Debug, PartialEq, Hash, Serialize, Deserialize)]
 pub enum DataType {
-    #[display("BOOLEAN")]
     Boolean,
-    #[display("INTEGER")]
     Integer,
-    #[display("FLOAT")]
     Float,
-    #[display("STRING")]
-    String,
+    Decimal {
+        precision: Option<u64>,
+        scale: Option<u64>,
+    },
+    String {
+        length: Option<u64>,
+    },
+    Date,
 }
 
 impl TryFrom<&ast::DataType> for DataType {
@@ -28,32 +33,234 @@ impl TryFrom<&ast::DataType> for DataType {
             ast::DataType::Boolean => Ok(DataType::Boolean),
             ast::DataType::Integer(_) | ast::DataType::Int(_) => Ok(DataType::Integer),
             ast::DataType::Float(_) => Ok(DataType::Float),
-            ast::DataType::String(_) => Ok(DataType::String),
+            ast::DataType::Decimal(dec) => match dec {
+                ast::ExactNumberInfo::None => Ok(DataType::Decimal {
+                    precision: None,
+                    scale: None,
+                }),
+                ast::ExactNumberInfo::Precision(p) => Ok(DataType::Decimal {
+                    precision: Some(*p),
+                    scale: None,
+                }),
+                ast::ExactNumberInfo::PrecisionAndScale(p, s) => Ok(DataType::Decimal {
+                    precision: Some(*p),
+                    scale: Some(*s),
+                }),
+            },
+            ast::DataType::String(length) => Ok(DataType::String { length: *length }),
+            ast::DataType::Varchar(length) => Ok(DataType::String {
+                length: (*length).map(|l| match l {
+                    ast::CharacterLength::IntegerLength { length, .. } => length,
+                    ast::CharacterLength::Max => u64::MAX,
+                }),
+            }),
+            ast::DataType::Date => Ok(DataType::Date),
             _ => Err(Error::InvalidDataType(value.clone())),
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Display)]
+impl std::fmt::Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DataType::Boolean => write!(f, "BOOLEAN"),
+            DataType::Integer => write!(f, "INTEGER"),
+            DataType::Float => write!(f, "FLOAT"),
+            DataType::Decimal {
+                precision: Some(p),
+                scale: Some(s),
+            } => write!(f, "DECIMAL({}, {})", p, s),
+            DataType::Decimal {
+                precision: Some(p),
+                scale: None,
+            } => write!(f, "DECIMAL({})", p),
+            DataType::Decimal {
+                precision: None,
+                scale: Some(s),
+            } => write!(f, "DECIMAL(0, {})", s),
+            DataType::Decimal {
+                precision: None,
+                scale: None,
+            } => write!(f, "DECIMAL"),
+            DataType::String { length } => match length {
+                Some(l) => write!(f, "VARCHAR({})", l),
+                None => write!(f, "VARCHAR"),
+            },
+            DataType::Date => write!(f, "DATE"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Value {
-    #[display("NULL")]
     Null,
     Boolean(bool),
     Integer(i64),
     Float(f64),
     String(String),
+    Date(NaiveDate),
 }
 
 impl ValueEncoding for Value {}
 
 impl Value {
-    pub fn data_type(&self) -> Option<DataType> {
+    pub fn is_compatible(&self, data_type: &DataType) -> bool {
+        match (self, data_type) {
+            (Value::Null, _) => true,
+            (Value::Boolean(_), DataType::Boolean) => true,
+            (Value::Integer(_), DataType::Integer) => true,
+            (Value::Float(_), DataType::Float) => true,
+            (Value::Float(f), DataType::Decimal { precision, scale }) => {
+                if let Some(p) = precision {
+                    if let Some(s) = scale {
+                        let f_str = f.to_string();
+                        if f_str.len() > *p as usize {
+                            return false;
+                        }
+                        if let Some(dot_pos) = f_str.find('.') {
+                            if f_str.len() - dot_pos - 1 > *s as usize {
+                                return false;
+                            }
+                        }
+                    } else {
+                        let f_str = f.to_string();
+                        if f_str.len() > *p as usize {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            (Value::String(s), DataType::String { length }) => {
+                length.is_none_or(|l| s.len() <= l as usize)
+            }
+            (Value::Date(_), DataType::Date) => true,
+
+            (Value::String(s), DataType::Integer) => s.parse::<i64>().is_ok(),
+            (Value::String(s), DataType::Float) => s.parse::<f64>().is_ok(),
+            (Value::String(s), DataType::Date) => NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok(),
+
+            _ => false,
+        }
+    }
+
+    pub fn try_cast(&self, data_type: &DataType) -> Result<Value, Error> {
+        match (self, data_type) {
+            (Value::Null, _) => Ok(Value::Null),
+            (Value::Boolean(b), DataType::Boolean) => Ok(Value::Boolean(*b)),
+            (Value::Integer(i), DataType::Integer) => Ok(Value::Integer(*i)),
+            (Value::Float(f), DataType::Float) => Ok(Value::Float(*f)),
+            (Value::String(s), DataType::String { length }) => {
+                if length.is_none_or(|l| s.len() <= l as usize) {
+                    Ok(Value::String(s.clone()))
+                } else {
+                    Err(Error::InvalidCast(self.clone(), *data_type))
+                }
+            }
+            (Value::Date(d), DataType::Date) => Ok(Value::Date(*d)),
+
+            (Value::Float(f), DataType::Decimal { precision, scale }) => {
+                if let Some(p) = precision {
+                    if let Some(s) = scale {
+                        let f_str = f.to_string();
+                        if f_str.len() > *p as usize {
+                            return Err(Error::InvalidCast(self.clone(), *data_type));
+                        }
+                        if let Some(dot_pos) = f_str.find('.') {
+                            if f_str.len() - dot_pos - 1 > *s as usize {
+                                return Err(Error::InvalidCast(self.clone(), *data_type));
+                            }
+                        }
+                    } else {
+                        let f_str = f.to_string();
+                        if f_str.len() > *p as usize {
+                            return Err(Error::InvalidCast(self.clone(), *data_type));
+                        }
+                    }
+                }
+                Ok(Value::Float(*f))
+            }
+
+            (Value::String(s), DataType::Integer) => s
+                .parse::<i64>()
+                .map(Value::Integer)
+                .map_err(|_| Error::InvalidCast(self.clone(), *data_type)),
+            (Value::String(s), DataType::Float) => s
+                .parse::<f64>()
+                .map(Value::Float)
+                .map_err(|_| Error::InvalidCast(self.clone(), *data_type)),
+            (Value::String(s), DataType::Date) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(Value::Date)
+                .map_err(|_| Error::InvalidDate(s.clone())),
+
+            _ => Err(Error::InvalidCast(self.clone(), *data_type)),
+        }
+    }
+
+    pub fn try_from_ast(value: &ast::Value, type_hint: Option<DataType>) -> Result<Self, Error> {
+        match value {
+            ast::Value::Null => Ok(Value::Null),
+            ast::Value::Boolean(b) => Ok(Value::Boolean(*b)),
+            ast::Value::Number(n, _) => {
+                if let Some(type_hint) = type_hint {
+                    match type_hint {
+                        DataType::Integer => {
+                            if let Ok(i) = n.parse::<i64>() {
+                                return Ok(Value::Integer(i));
+                            }
+                        }
+                        DataType::Float => {
+                            if let Ok(f) = n.parse::<f64>() {
+                                return Ok(Value::Float(f));
+                            }
+                        }
+                        DataType::Decimal { .. } => {
+                            if let Ok(f) = n.parse::<f64>() {
+                                return Ok(Value::Float(f));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Ok(i) = n.parse::<i64>() {
+                    Ok(Value::Integer(i))
+                } else if let Ok(f) = n.parse::<f64>() {
+                    Ok(Value::Float(f))
+                } else {
+                    Err(Error::InvalidValue(Box::new(value.clone())))
+                }
+            }
+            ast::Value::SingleQuotedString(s) | ast::Value::DoubleQuotedString(s) => {
+                if let Some(type_hint) = type_hint {
+                    match type_hint {
+                        DataType::String { .. } => return Ok(Value::String(s.clone())),
+                        DataType::Date => {
+                            if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                                return Ok(Value::Date(date));
+                            } else {
+                                return Err(Error::InvalidDate(s.clone()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Value::String(s.clone()))
+            }
+
+            _ => Err(Error::InvalidValue(Box::new(value.clone()))),
+        }
+    }
+}
+
+impl std::fmt::Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Null => None,
-            Value::Boolean(_) => Some(DataType::Boolean),
-            Value::Integer(_) => Some(DataType::Integer),
-            Value::Float(_) => Some(DataType::Float),
-            Value::String(_) => Some(DataType::String),
+            Value::Null => write!(f, "NULL"),
+            Value::Boolean(v) => write!(f, "{}", v),
+            Value::Integer(v) => write!(f, "{}", v),
+            Value::Float(v) => write!(f, "{}", v),
+            Value::String(v) => write!(f, "'{}'", v),
+            Value::Date(v) => write!(f, "'{}'", v),
         }
     }
 }
@@ -68,6 +275,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Integer(b)) => *a == *b as f64,
             (Value::Float(a), Value::Float(b)) => a == b || a.is_nan() && b.is_nan(),
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Date(a), Value::Date(b)) => a == b,
             _ => false,
         }
     }
@@ -90,6 +298,7 @@ impl Hash for Value {
                 }
             }
             Value::String(v) => v.hash(state),
+            Value::Date(v) => v.hash(state),
         }
     }
 }
@@ -104,6 +313,7 @@ impl Ord for Value {
             (Value::Float(a), Value::Integer(b)) => a.total_cmp(&(*b as f64)),
             (Value::Float(a), Value::Float(b)) => a.total_cmp(b),
             (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Date(a), Value::Date(b)) => a.cmp(b),
 
             (Self::Null, _) => std::cmp::Ordering::Less,
             (_, Self::Null) => std::cmp::Ordering::Greater,
@@ -113,6 +323,8 @@ impl Ord for Value {
             (_, Self::Integer(_)) => std::cmp::Ordering::Greater,
             (Self::Float(_), _) => std::cmp::Ordering::Less,
             (_, Self::Float(_)) => std::cmp::Ordering::Greater,
+            (Self::String(_), _) => std::cmp::Ordering::Less,
+            (_, Self::String(_)) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -120,29 +332,6 @@ impl Ord for Value {
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-impl TryFrom<&ast::Value> for Value {
-    type Error = Error;
-
-    fn try_from(value: &ast::Value) -> Result<Self, Self::Error> {
-        match value {
-            ast::Value::Null => Ok(Value::Null),
-            ast::Value::Boolean(b) => Ok(Value::Boolean(*b)),
-            ast::Value::Number(n, _) => {
-                if let Ok(i) = n.parse::<i64>() {
-                    Ok(Value::Integer(i))
-                } else if let Ok(f) = n.parse::<f64>() {
-                    Ok(Value::Float(f))
-                } else {
-                    Err(Error::InvalidValue(Box::new(value.clone())))
-                }
-            }
-            ast::Value::SingleQuotedString(s) => Ok(Value::String(s.clone())),
-
-            _ => Err(Error::InvalidValue(Box::new(value.clone()))),
-        }
     }
 }
 
@@ -161,7 +350,7 @@ impl TryFrom<&ast::Value> for Value {
     Display,
     From,
 )]
-#[display("{:?}", self.0)]
+#[display("{:?}", self.iter().as_slice())]
 pub struct Row(Box<[Value]>);
 
 impl ValueEncoding for Row {}
@@ -182,9 +371,9 @@ impl IntoIterator for Row {
     }
 }
 
-pub trait RowIter: Iterator<Item = Result<Row, Error>> {}
-// dyn_clone::clone_trait_object!(RowIter);
-impl<T: Iterator<Item = Result<Row, Error>>> RowIter for T {}
+pub trait RowIter: Iterator<Item = Result<Row, Error>> + DynClone {}
+dyn_clone::clone_trait_object!(RowIter);
+impl<T: Iterator<Item = Result<Row, Error>> + DynClone> RowIter for T {}
 
 pub type Rows = Box<dyn RowIter>;
 
@@ -202,68 +391,5 @@ impl std::fmt::Display for ColumnLabel {
             ColumnLabel::Unqualified(name) => write!(f, "{}", name),
             ColumnLabel::Qualified(table, column) => write!(f, "{}.{}", table, column),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_convert_data_type() {
-        let ast_data_type = ast::DataType::Boolean;
-        let data_type = DataType::try_from(&ast_data_type).unwrap();
-        assert_eq!(data_type, DataType::Boolean);
-
-        let ast_data_type = ast::DataType::Integer(None);
-        let data_type = DataType::try_from(&ast_data_type).unwrap();
-        assert_eq!(data_type, DataType::Integer);
-
-        let ast_data_type = ast::DataType::Float(None);
-        let data_type = DataType::try_from(&ast_data_type).unwrap();
-        assert_eq!(data_type, DataType::Float);
-
-        let ast_data_type = ast::DataType::String(None);
-        let data_type = DataType::try_from(&ast_data_type).unwrap();
-        assert_eq!(data_type, DataType::String);
-    }
-
-    #[test]
-    fn test_convert_invalid_data_type() {
-        let ast_data_type = ast::DataType::Date;
-        let result = DataType::try_from(&ast_data_type);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), Error::InvalidDataType(ast_data_type));
-    }
-
-    #[test]
-    fn test_convert_value() {
-        let ast_value = ast::Value::Boolean(true);
-        let value = Value::try_from(&ast_value).unwrap();
-        assert_eq!(value, Value::Boolean(true));
-
-        let ast_value = ast::Value::Number("42".to_string(), false);
-        let value = Value::try_from(&ast_value).unwrap();
-        assert_eq!(value, Value::Integer(42));
-
-        let ast_value = ast::Value::SingleQuotedString("Hello".to_string());
-        let value = Value::try_from(&ast_value).unwrap();
-        assert_eq!(value, Value::String("Hello".to_string()));
-    }
-
-    #[test]
-    fn test_convert_invalid_value() {
-        let ast_value = ast::Value::Null;
-        let result = Value::try_from(&ast_value);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Value::Null);
-
-        let ast_value = ast::Value::Number("invalid".to_string(), false);
-        let result = Value::try_from(&ast_value);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            Error::InvalidValue(Box::new(ast_value))
-        );
     }
 }

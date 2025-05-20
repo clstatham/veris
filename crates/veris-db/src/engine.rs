@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use derive_more::Display;
 use serde::{Deserialize, Serialize};
 
@@ -5,7 +7,7 @@ use crate::{
     error::Error,
     exec::expr::Expr,
     types::{
-        schema::{Table, TableName},
+        schema::{ColumnName, Table, TableName},
         value::{Row, Rows, Value},
     },
     wrap,
@@ -34,6 +36,12 @@ pub trait Transaction: Catalog {
     fn get(&self, table: &TableName, ids: &[Value]) -> Result<Box<[Row]>, Error>;
     fn insert(&self, table: &TableName, rows: Box<[Row]>) -> Result<(), Error>;
     fn scan(&self, table: &TableName, filter: Option<Expr>) -> Result<Rows, Error>;
+    fn lookup_index(
+        &self,
+        table: &TableName,
+        column: &ColumnName,
+        values: &[Value],
+    ) -> Result<BTreeSet<Value>, Error>;
 }
 
 pub trait Engine<'a> {

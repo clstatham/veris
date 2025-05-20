@@ -15,6 +15,7 @@ use super::plan::Planner;
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum StatementResult {
     Null,
+    Error(String),
     Begin,
     Commit,
     Rollback,

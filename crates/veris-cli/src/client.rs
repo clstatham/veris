@@ -1,5 +1,5 @@
 use std::{
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::TcpStream,
 };
 
@@ -78,71 +78,7 @@ impl Client {
                                 break 'repl;
                             }
                             ControlFlow::Continue => {}
-                            ControlFlow::Response(resp) => match resp {
-                                Response::Execute(resp) => match resp {
-                                    StatementResult::ShowTables { tables } => {
-                                        for table in tables {
-                                            let mut ascii_table = AsciiTable::default();
-                                            let mut data = Vec::new();
-                                            for (i, column) in table.columns.iter().enumerate() {
-                                                ascii_table
-                                                    .column(i)
-                                                    .set_header(&*column.name)
-                                                    .set_align(Align::Right);
-                                                data.push(format!("{}", &column.data_type));
-                                            }
-                                            println!("Table: {}", table.name);
-                                            ascii_table.print(vec![data]);
-                                        }
-                                    }
-                                    StatementResult::Select { rows, columns } => {
-                                        let mut ascii_table = AsciiTable::default();
-                                        for (i, column) in columns.iter().enumerate() {
-                                            ascii_table
-                                                .column(i)
-                                                .set_header(column.to_string())
-                                                .set_align(Align::Right);
-                                        }
-                                        let mut data = Vec::new();
-                                        for row in rows {
-                                            let mut inner = Vec::new();
-                                            for item in row {
-                                                inner.push(item);
-                                            }
-                                            data.push(inner);
-                                        }
-                                        ascii_table.print(data);
-                                    }
-                                    StatementResult::Insert(count) => {
-                                        println!("Inserted {count} rows");
-                                    }
-                                    StatementResult::Delete(count) => {
-                                        println!("Deleted {count} rows");
-                                    }
-                                    StatementResult::Begin => {
-                                        println!("Transaction started");
-                                    }
-                                    StatementResult::Commit => {
-                                        println!("Transaction committed");
-                                    }
-                                    StatementResult::Rollback => {
-                                        println!("Transaction rolled back");
-                                    }
-                                    StatementResult::CreateTable(name) => {
-                                        println!("Created table {name}");
-                                    }
-                                    StatementResult::DropTable(name) => {
-                                        println!("Dropped table {name}");
-                                    }
-                                    StatementResult::Null => {}
-                                },
-                                Response::Error(resp) => {
-                                    println!("Error: {resp}")
-                                }
-                                Response::Debug(resp) => {
-                                    println!("{resp}")
-                                }
-                            },
+                            ControlFlow::Response(resp) => self.handle_response(resp)?,
                         },
                         Err(e) => {
                             if let ClientError::Serialization(e) = &e {
@@ -194,8 +130,9 @@ impl Client {
         };
         let req = match first {
             ".q" => return Ok(ControlFlow::Exit),
-            ".?" => Request::Debug(line[3..].to_string()),
-            _ => Request::Execute(line.lines().collect()),
+            ".x" => self.load_sql(line[3..].trim())?,
+            ".?" => Request::Debug(line[3..].trim().to_string()),
+            _ => Request::Execute(line.to_string()),
         };
         let req = serde_json::to_string(&req)?;
         writeln!(tx, "{}", req)?;
@@ -205,5 +142,89 @@ impl Client {
         let resp: Response = serde_json::from_str(&resp)?;
 
         Ok(ControlFlow::Response(resp))
+    }
+
+    pub fn load_sql(&self, path: &str) -> Result<Request, ClientError> {
+        let file = std::fs::File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut sql = String::new();
+        reader.read_to_string(&mut sql)?;
+        Ok(Request::Execute(sql))
+    }
+
+    pub fn handle_response(&self, resp: Response) -> Result<(), ClientError> {
+        match resp {
+            Response::Execute(resps) => {
+                for resp in resps {
+                    match resp {
+                        StatementResult::Error(e) => {
+                            println!("Error: {e}");
+                        }
+                        StatementResult::ShowTables { tables } => {
+                            for table in tables {
+                                let mut ascii_table = AsciiTable::default();
+                                let mut data = Vec::new();
+                                for (i, column) in table.columns.iter().enumerate() {
+                                    ascii_table
+                                        .column(i)
+                                        .set_header(&*column.name)
+                                        .set_align(Align::Right);
+                                    data.push(format!("{}", &column.data_type));
+                                }
+                                println!("Table: {}", table.name);
+                                ascii_table.print(vec![data]);
+                            }
+                        }
+                        StatementResult::Select { rows, columns } => {
+                            let mut ascii_table = AsciiTable::default();
+                            for (i, column) in columns.iter().enumerate() {
+                                ascii_table
+                                    .column(i)
+                                    .set_header(column.to_string())
+                                    .set_align(Align::Right);
+                            }
+                            let mut data = Vec::new();
+                            for row in rows {
+                                let mut inner = Vec::new();
+                                for item in row {
+                                    inner.push(item);
+                                }
+                                data.push(inner);
+                            }
+                            ascii_table.print(data);
+                        }
+                        StatementResult::Insert(count) => {
+                            println!("Inserted {count} rows");
+                        }
+                        StatementResult::Delete(count) => {
+                            println!("Deleted {count} rows");
+                        }
+                        StatementResult::Begin => {
+                            println!("Transaction started");
+                        }
+                        StatementResult::Commit => {
+                            println!("Transaction committed");
+                        }
+                        StatementResult::Rollback => {
+                            println!("Transaction rolled back");
+                        }
+                        StatementResult::CreateTable(name) => {
+                            println!("Created table {name}");
+                        }
+                        StatementResult::DropTable(name) => {
+                            println!("Dropped table {name}");
+                        }
+                        StatementResult::Null => {}
+                    }
+                }
+            }
+            Response::Error(resp) => {
+                println!("Error: {resp}")
+            }
+            Response::Debug(resp) => {
+                println!("{resp}")
+            }
+        }
+        Ok(())
     }
 }

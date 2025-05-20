@@ -116,6 +116,19 @@ pub enum Node {
         source: Box<Node>,
         expressions: Vec<Expr>,
     },
+    HashJoin {
+        left: Box<Node>,
+        left_col: ColumnIndex,
+        right: Box<Node>,
+        right_col: ColumnIndex,
+        outer: bool,
+    },
+    NestedLoopJoin {
+        left: Box<Node>,
+        right: Box<Node>,
+        predicate: Option<Expr>,
+        outer: bool,
+    },
 }
 
 impl Node {
@@ -125,6 +138,9 @@ impl Node {
             Self::Values { rows } => rows.first().map(|row| row.len()).unwrap_or(0),
             Self::Filter { source, .. } => source.num_columns(),
             Self::Project { expressions, .. } => expressions.len(),
+            Self::HashJoin { left, right, .. } | Self::NestedLoopJoin { left, right, .. } => {
+                left.num_columns() + right.num_columns()
+            }
         }
     }
 
@@ -143,6 +159,13 @@ impl Node {
                 Some(Expr::Column(index)) => source.column_label(index),
                 Some(_) | None => ColumnLabel::None,
             },
+            Self::HashJoin { left, right, .. } | Self::NestedLoopJoin { left, right, .. } => {
+                if *index.inner() < left.num_columns() {
+                    left.column_label(index)
+                } else {
+                    right.column_label(&(index.clone() - left.num_columns()))
+                }
+            }
         }
     }
 
@@ -160,12 +183,12 @@ impl Node {
         let scope = Scope::default();
         let mut rows = Vec::new();
         for row in &vals.rows {
-            let mut values = Vec::new();
+            let mut exprs = Vec::new();
             for expr in row {
-                let value = Expr::build(expr, &scope)?;
-                values.push(value);
+                let expr = Expr::build(expr, &scope)?;
+                exprs.push(expr);
             }
-            rows.push(values);
+            rows.push(exprs);
         }
         Ok(Node::Values { rows })
     }
@@ -175,15 +198,18 @@ impl Node {
         if select.from.is_empty() {
             return Err(Error::InvalidSql(select.to_string()));
         }
-        let table_name = TableName::new(select.from[0].to_string());
-        let table = catalog
-            .get_table(&table_name)?
-            .ok_or(Error::TableDoesNotExist(table_name))?;
-        scope.add_table(&table)?;
-        let mut node = Node::Scan {
-            table,
-            filter: None,
-        };
+
+        let mut node = Self::from_from(&select.from[0], &mut scope, catalog)?;
+        for from in select.from.iter().skip(1) {
+            let right = Self::from_from(from, &mut scope, catalog)?;
+            node = Node::NestedLoopJoin {
+                left: Box::new(node),
+                right: Box::new(right),
+                predicate: None,
+                outer: false,
+            };
+        }
+
         if let Some(where_clause) = &select.selection {
             node = Node::Filter {
                 source: Box::new(node),
@@ -213,6 +239,84 @@ impl Node {
             node = Node::Project {
                 source: Box::new(node),
                 expressions,
+            };
+        }
+
+        Ok(node)
+    }
+
+    fn from_relation(
+        relation: &ast::TableFactor,
+        scope: &mut Scope,
+        catalog: &impl Catalog,
+    ) -> Result<Node, Error> {
+        let node = match relation {
+            ast::TableFactor::Table { name, alias, .. } => {
+                let table_name = TableName::new(name.to_string());
+                let table = catalog
+                    .get_table(&table_name)?
+                    .ok_or(Error::TableDoesNotExist(table_name))?;
+                let alias = alias.as_ref().map(|a| TableName::new(a.name.value.clone()));
+                scope.add_table(&table, alias.as_ref())?;
+                Node::Scan {
+                    table,
+                    filter: None,
+                }
+            }
+            ast::TableFactor::NestedJoin {
+                table_with_joins,
+                alias,
+            } => {
+                assert!(alias.is_none());
+                Self::from_from(table_with_joins, scope, catalog)?
+            }
+            _ => return Err(Error::NotYetSupported(format!("{relation:?}"))),
+        };
+
+        Ok(node)
+    }
+
+    fn from_from(
+        from: &ast::TableWithJoins,
+        scope: &mut Scope,
+        catalog: &impl Catalog,
+    ) -> Result<Node, Error> {
+        let mut node = Self::from_relation(&from.relation, scope, catalog)?;
+
+        for join in &from.joins {
+            let right = Self::from_relation(&join.relation, scope, catalog)?;
+            let mut predicate = None;
+            match &join.join_operator {
+                ast::JoinOperator::Join(constraint) => match constraint {
+                    ast::JoinConstraint::None => {}
+                    ast::JoinConstraint::On(expr) => {
+                        predicate = Some(Expr::build(expr, scope)?);
+                    }
+                    _ => {
+                        return Err(Error::NotYetSupported(join.to_string()));
+                    }
+                },
+                ast::JoinOperator::Left(constraint) => match constraint {
+                    ast::JoinConstraint::None => {}
+                    ast::JoinConstraint::On(expr) => {
+                        predicate = Some(Expr::build(expr, scope)?);
+                    }
+                    _ => {
+                        return Err(Error::NotYetSupported(join.to_string()));
+                    }
+                },
+                ast::JoinOperator::CrossJoin => {
+                    // Cross join does not have an ON clause
+                }
+                _ => {
+                    return Err(Error::NotYetSupported(join.to_string()));
+                }
+            }
+            node = Node::NestedLoopJoin {
+                left: Box::new(node),
+                right: Box::new(right),
+                predicate,
+                outer: false,
             };
         }
 
