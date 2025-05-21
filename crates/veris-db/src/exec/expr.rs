@@ -39,62 +39,14 @@ impl Expr {
                     BinaryOp::Subtract => a.checked_sub(&b)?,
                     BinaryOp::Multiply => a.checked_mul(&b)?,
                     BinaryOp::Divide => a.checked_div(&b)?,
-                    BinaryOp::Equal => {
-                        if a == b {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::NotEqual => {
-                        if a != b {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::GreaterThan => {
-                        if a > b {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::LessThan => {
-                        if a < b {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::GreaterThanOrEqual => {
-                        if a >= b {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::LessThanOrEqual => {
-                        if a <= b {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::And => {
-                        if a.is_truthy() && b.is_truthy() {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    BinaryOp::Or => {
-                        if a.is_truthy() || b.is_truthy() {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
+                    BinaryOp::Equal => Value::Boolean(a == b),
+                    BinaryOp::NotEqual => Value::Boolean(a != b),
+                    BinaryOp::GreaterThan => Value::Boolean(a > b),
+                    BinaryOp::LessThan => Value::Boolean(a < b),
+                    BinaryOp::GreaterThanOrEqual => Value::Boolean(a >= b),
+                    BinaryOp::LessThanOrEqual => Value::Boolean(a <= b),
+                    BinaryOp::And => Value::Boolean(a.is_truthy() && b.is_truthy()),
+                    BinaryOp::Or => Value::Boolean(a.is_truthy() || b.is_truthy()),
 
                     _ => {
                         return Err(Error::NotYetSupported(format!(
@@ -113,7 +65,7 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expr::Constant(value) => write!(f, "{}", value),
-            Expr::Column(index) => write!(f, "{}", index),
+            Expr::Column(index) => write!(f, "col{}", index),
             Expr::BinaryOp(left, op, right) => {
                 write!(f, "({} {} {})", left, op, right)
             }

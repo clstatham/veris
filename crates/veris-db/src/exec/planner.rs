@@ -241,8 +241,8 @@ impl<'a, C: Catalog> Planner<'a, C> {
                 return Err(Error::NotYetSupported(stmt.to_string()));
             }
         }
-        let funcions_and_aggregates = self.collect_aggregates(&stmt.projection, &scope)?;
-        if !group_by.is_empty() || !funcions_and_aggregates.is_empty() {
+        let functions_and_aggregates = self.collect_aggregates(&stmt.projection, &scope)?;
+        if !group_by.is_empty() || !functions_and_aggregates.is_empty() {
             let mut child_scope = scope.spawn();
 
             for expr in &group_by {
@@ -255,7 +255,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
             }
 
             let mut aggregates = Vec::new();
-            for (func, agg) in funcions_and_aggregates {
+            for (func, agg) in functions_and_aggregates {
                 child_scope.add_aggregate(func)?;
                 aggregates.push(agg);
             }

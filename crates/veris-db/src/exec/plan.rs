@@ -62,7 +62,7 @@ pub enum Plan {
 
 impl Plan {
     pub fn execute(self, transaction: &impl Transaction) -> Result<StatementResult, Error> {
-        println!("Executing plan: {}", self);
+        log::debug!("Executing plan:\n{}", self);
         Executor::new(transaction).execute(self)
     }
 
@@ -186,6 +186,7 @@ impl Plan {
         match self {
             Plan::CreateTable(table) => {
                 writeln!(f, "CreateTable: {}", table.name)?;
+
                 for column in &table.columns {
                     writeln!(f, "{}  └── {:?}", prefix, column)?;
                 }
@@ -199,7 +200,7 @@ impl Plan {
             }
             Plan::Delete { table, source } => {
                 writeln!(f, "Delete: {}", table.name)?;
-                writeln!(f, "{}  └── {}", prefix, source)?;
+                writeln!(f, "{}└── {}", prefix, source)?;
             }
             Plan::Query(source) => {
                 writeln!(f, "Query")?;
@@ -210,12 +211,12 @@ impl Plan {
                 group_by,
                 aggregates,
             } => {
-                writeln!(f, "Aggregate")?;
-                for expr in group_by {
-                    writeln!(f, "{}  ├── {}", prefix, expr)?;
+                writeln!(f, "Aggregate ({} groups)", group_by.len())?;
+                for group in group_by.iter() {
+                    writeln!(f, "{}├── {}", prefix, group)?;
                 }
-                for aggregate in aggregates {
-                    writeln!(f, "{}  └── {}", prefix, aggregate)?;
+                for aggregate in aggregates.iter() {
+                    writeln!(f, "{}├── {}", prefix, aggregate)?;
                 }
                 source.format(f, &prefix, false, true)?;
             }
@@ -238,11 +239,8 @@ impl Plan {
                 left.format(f, &prefix, false, false)?;
                 right.format(f, &prefix, false, true)?;
             }
-            Plan::Nothing { columns } => {
+            Plan::Nothing { .. } => {
                 writeln!(f, "Nothing")?;
-                for column in columns {
-                    writeln!(f, "{}  └── {}", prefix, column)?;
-                }
             }
             Plan::Project {
                 source,
@@ -251,7 +249,7 @@ impl Plan {
             } => {
                 writeln!(f, "Project")?;
                 for (i, column) in columns.iter().enumerate() {
-                    writeln!(f, "{}  ├── {}: {}", prefix, aliases[i], column)?;
+                    writeln!(f, "{}├── {}: {}", prefix, aliases[i], column)?;
                 }
                 source.format(f, &prefix, false, true)?;
             }
@@ -259,24 +257,21 @@ impl Plan {
                 writeln!(f, "Remap")?;
                 for target in targets {
                     if let Some(target) = target {
-                        writeln!(f, "{}  ├── {:?}", prefix, target)?;
+                        writeln!(f, "{}├── {:?}", prefix, target)?;
                     } else {
-                        writeln!(f, "{}  └── None", prefix)?;
+                        writeln!(f, "{}└── None", prefix)?;
                     }
                 }
                 source.format(f, &prefix, false, true)?;
             }
-            Plan::Scan {
-                table: _,
-                filter: _,
-                alias: _,
-            } => {
+            Plan::Scan { table, .. } => {
                 writeln!(f, "Scan")?;
+                writeln!(f, "{}└── {}", prefix, table.name)?;
             }
             Plan::Values { rows } => {
                 writeln!(f, "Values")?;
                 for row in rows {
-                    writeln!(f, "{}  └── {:?}", prefix, row)?;
+                    writeln!(f, "{}└── {:?}", prefix, row)?;
                 }
             }
         }
