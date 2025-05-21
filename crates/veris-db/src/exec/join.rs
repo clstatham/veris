@@ -1,57 +1,106 @@
-use std::{collections::HashMap, iter::Peekable};
+use std::iter::Peekable;
 
 use crate::{
     error::Error,
-    types::{
-        schema::ColumnIndex,
-        value::{Row, Rows, Value},
-    },
+    types::value::{Row, Rows, Value},
 };
 
 use super::expr::Expr;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+}
+
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct NestedLoopJoiner {
     left: Peekable<Rows>,
-    right: Rows,
-    right_orig: Rows,
+    right: Peekable<Rows>,
+    left_orig: Peekable<Rows>,
+    right_orig: Peekable<Rows>,
+    left_cols: usize,
     right_cols: usize,
+    left_matched: bool,
     right_matched: bool,
-    predicate: Option<Expr>,
-    outer: bool,
+    on: Option<Expr>,
+    join_type: JoinType,
 }
 
 impl NestedLoopJoiner {
     pub fn new(
         left: Rows,
         right: Rows,
+        left_cols: usize,
         right_cols: usize,
-        predicate: Option<Expr>,
-        outer: bool,
+        on: Option<Expr>,
+        join_type: JoinType,
     ) -> Self {
+        let left = left.peekable();
+        let right = right.peekable();
+        let left_orig = left.clone();
+        let right_orig = right.clone();
         Self {
-            left: left.peekable(),
-            right_orig: right.clone(),
+            left,
             right,
+            left_orig,
+            right_orig,
+            left_cols,
             right_cols,
+            left_matched: false,
             right_matched: false,
-            predicate,
-            outer,
+            on,
+            join_type,
         }
     }
 
     fn try_next(&mut self) -> Result<Option<Row>, Error> {
+        match self.join_type {
+            JoinType::Inner => self.inner_join(),
+            JoinType::Left => self.left_join(),
+            JoinType::Right => self.right_join(),
+        }
+    }
+
+    fn inner_join(&mut self) -> Result<Option<Row>, Error> {
         while let Some(Ok(left)) = self.left.peek() {
             while let Some(right) = self.right.next().transpose()? {
                 let row = left.iter().cloned().chain(right).collect();
-                if let Some(predicate) = self.predicate.as_ref() {
-                    match predicate.evaluate(Some(&row))? {
-                        Value::Boolean(true) => {
-                            return Ok(Some(row));
-                        }
+                if let Some(pred) = &self.on {
+                    match pred.eval(Some(&row))? {
+                        Value::Boolean(true) => {}
                         Value::Boolean(false) | Value::Null => continue,
-                        result => {
-                            return Err(Error::InvalidFilterResult(result));
+                        val => {
+                            return Err(Error::InvalidFilterResult(val));
+                        }
+                    }
+                }
+                self.left_matched = true;
+                self.right_matched = true;
+                return Ok(Some(row));
+            }
+
+            self.right = self.right_orig.clone();
+            self.right_matched = false;
+            self.left_matched = false;
+            self.left.next().transpose()?;
+        }
+
+        self.left.next().transpose()
+    }
+
+    fn left_join(&mut self) -> Result<Option<Row>, Error> {
+        while let Some(Ok(left)) = self.left.peek() {
+            while let Some(right) = self.right.next().transpose()? {
+                let row = left.iter().cloned().chain(right).collect();
+                if let Some(pred) = &self.on {
+                    match pred.eval(Some(&row))? {
+                        Value::Boolean(true) => {}
+                        Value::Boolean(false) | Value::Null => continue,
+                        val => {
+                            return Err(Error::InvalidFilterResult(val));
                         }
                     }
                 }
@@ -59,18 +108,13 @@ impl NestedLoopJoiner {
                 return Ok(Some(row));
             }
 
-            // no right match
-            if !self.right_matched && self.outer {
+            if !self.right_matched {
+                let null_row = std::iter::repeat_n(Value::Null, self.right_cols);
+                let row = left.iter().cloned().chain(null_row).collect();
                 self.right_matched = true;
-                return Ok(Some(
-                    left.iter()
-                        .cloned()
-                        .chain(std::iter::repeat_n(Value::Null, self.right_cols))
-                        .collect(),
-                ));
+                return Ok(Some(row));
             }
 
-            // end of right source, on the the next left row
             self.right = self.right_orig.clone();
             self.right_matched = false;
             self.left.next().transpose()?;
@@ -78,81 +122,15 @@ impl NestedLoopJoiner {
 
         self.left.next().transpose()
     }
+
+    fn right_join(&mut self) -> Result<Option<Row>, Error> {
+        Err(Error::NotYetSupported(
+            "Right join is not implemented".to_string(),
+        ))
+    }
 }
 
 impl Iterator for NestedLoopJoiner {
-    type Item = Result<Row, Error>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.try_next().transpose()
-    }
-}
-
-#[derive(Clone)]
-pub struct HashJoiner {
-    left: Rows,
-    left_col: ColumnIndex,
-    right: HashMap<Value, Vec<Row>>,
-    right_cols: usize,
-    outer: bool,
-    pending: Rows,
-}
-
-impl HashJoiner {
-    pub fn new(
-        left: Rows,
-        left_col: ColumnIndex,
-        mut right: Rows,
-        right_col: ColumnIndex,
-        right_cols: usize,
-        outer: bool,
-    ) -> Result<Self, Error> {
-        let mut right_map: HashMap<Value, Vec<Row>> = HashMap::new();
-        while let Some(row) = right.next().transpose()? {
-            let value = row[*right_col.inner()].clone();
-            if value == Value::Null {
-                continue;
-            }
-            right_map.entry(value).or_default().push(row);
-        }
-        Ok(Self {
-            left,
-            left_col,
-            right: right_map,
-            right_cols,
-            outer,
-            pending: Box::new(std::iter::empty()),
-        })
-    }
-
-    fn try_next(&mut self) -> Result<Option<Row>, Error> {
-        if let Some(row) = self.pending.next().transpose()? {
-            return Ok(Some(row));
-        }
-
-        while let Some(left) = self.left.next().transpose()? {
-            if let Some(right) = self.right.get(&left[*self.left_col.inner()]).cloned() {
-                self.pending = Box::new(
-                    right
-                        .into_iter()
-                        .map(move |right| left.iter().cloned().chain(right).collect())
-                        .map(Ok),
-                );
-                return self.pending.next().transpose();
-            } else if self.outer {
-                return Ok(Some(
-                    left.into_iter()
-                        .chain(std::iter::repeat_n(Value::Null, self.right_cols))
-                        .collect(),
-                ));
-            }
-        }
-
-        Ok(None)
-    }
-}
-
-impl Iterator for HashJoiner {
     type Item = Result<Row, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {

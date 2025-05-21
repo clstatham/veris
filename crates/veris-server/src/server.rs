@@ -77,11 +77,11 @@ impl Server {
                 }
             };
 
-            log::info!("Request: {req:?}");
+            log::info!("Request: {req}");
 
             let resp = Self::process_request(&mut session, &req);
 
-            log::info!("Response: {resp:?}");
+            log::info!("Response: {resp}");
 
             let resp = format!("{}\n", serde_json::to_string(&resp)?);
             tx.write_all(resp.as_bytes()).await?;
@@ -115,7 +115,7 @@ impl Server {
                 for statement in &ast {
                     match session.exec(statement) {
                         Ok(val) => {
-                            results.push(val);
+                            results.push((statement.to_string(), val));
                         }
                         Err(e) => {
                             log::error!("Failed to execute SQL: {}", e);
@@ -123,10 +123,12 @@ impl Server {
                                 log::error!("Failed to rollback: {}", e);
                             } else {
                                 log::info!("Rolled back transaction");
-                                results.push(StatementResult::Rollback);
                             }
 
-                            results.push(StatementResult::Error(e.to_string()));
+                            results.push((
+                                statement.to_string(),
+                                StatementResult::Error(e.to_string()),
+                            ));
                             return Response::Execute(results);
                         }
                     }

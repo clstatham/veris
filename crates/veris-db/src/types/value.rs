@@ -10,7 +10,7 @@ use crate::{encoding::ValueEncoding, error::Error};
 
 use super::schema::{ColumnName, TableName};
 
-#[derive(Clone, Copy, Debug, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Hash, Serialize, Deserialize, Eq)]
 pub enum DataType {
     Boolean,
     Integer,
@@ -104,6 +104,10 @@ pub enum Value {
 impl ValueEncoding for Value {}
 
 impl Value {
+    pub fn is_truthy(&self) -> bool {
+        matches!(self, Value::Boolean(true))
+    }
+
     pub fn is_compatible(&self, data_type: &DataType) -> bool {
         match (self, data_type) {
             (Value::Null, _) => true,
@@ -250,6 +254,66 @@ impl Value {
             _ => Err(Error::InvalidValue(Box::new(value.clone()))),
         }
     }
+
+    pub fn is_undefined(&self) -> bool {
+        match self {
+            Self::Null => true,
+            Self::Float(f) if f.is_nan() => true,
+            _ => false,
+        }
+    }
+
+    pub fn checked_add(&self, other: &Self) -> Result<Self, Error> {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
+                a.checked_add(*b).ok_or(Error::IntegerOverflow)?,
+            )),
+            (Value::Integer(a), Value::Float(b)) => Ok(Self::Float(*a as f64 + *b)),
+            (Value::Float(a), Value::Integer(b)) => Ok(Self::Float(*a + *b as f64)),
+            (Value::Float(a), Value::Float(b)) => Ok(Self::Float(*a + *b)),
+            // todo
+            _ => Err(Error::NotYetSupported(format!("{self} + {other}"))),
+        }
+    }
+
+    pub fn checked_div(&self, other: &Self) -> Result<Self, Error> {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
+                a.checked_div(*b).ok_or(Error::IntegerOverflow)?,
+            )),
+            (Value::Integer(a), Value::Float(b)) => Ok(Self::Float(*a as f64 / *b)),
+            (Value::Float(a), Value::Integer(b)) => Ok(Self::Float(*a / *b as f64)),
+            (Value::Float(a), Value::Float(b)) => Ok(Self::Float(*a / *b)),
+            // todo
+            _ => Err(Error::NotYetSupported(format!("{self} / {other}"))),
+        }
+    }
+
+    pub fn checked_sub(&self, other: &Self) -> Result<Self, Error> {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
+                a.checked_sub(*b).ok_or(Error::IntegerOverflow)?,
+            )),
+            (Value::Integer(a), Value::Float(b)) => Ok(Self::Float(*a as f64 - *b)),
+            (Value::Float(a), Value::Integer(b)) => Ok(Self::Float(*a - *b as f64)),
+            (Value::Float(a), Value::Float(b)) => Ok(Self::Float(*a - *b)),
+            // todo
+            _ => Err(Error::NotYetSupported(format!("{self} - {other}"))),
+        }
+    }
+
+    pub fn checked_mul(&self, other: &Self) -> Result<Self, Error> {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
+                a.checked_mul(*b).ok_or(Error::IntegerOverflow)?,
+            )),
+            (Value::Integer(a), Value::Float(b)) => Ok(Self::Float(*a as f64 * *b)),
+            (Value::Float(a), Value::Integer(b)) => Ok(Self::Float(*a * *b as f64)),
+            (Value::Float(a), Value::Float(b)) => Ok(Self::Float(*a * *b)),
+            // todo
+            _ => Err(Error::NotYetSupported(format!("{self} * {other}"))),
+        }
+    }
 }
 
 impl std::fmt::Display for Value {
@@ -351,14 +415,14 @@ impl PartialOrd for Value {
     From,
 )]
 #[display("{:?}", self.iter().as_slice())]
-pub struct Row(Box<[Value]>);
+pub struct Row(Vec<Value>);
 
 impl ValueEncoding for Row {}
 
 impl FromIterator<Value> for Row {
     fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
         let vec: Vec<Value> = iter.into_iter().collect();
-        Row(vec.into_boxed_slice())
+        Row(vec)
     }
 }
 
@@ -382,6 +446,42 @@ pub enum ColumnLabel {
     None,
     Unqualified(ColumnName),
     Qualified(TableName, ColumnName),
+}
+
+impl ColumnLabel {
+    pub fn table_name(&self) -> Option<&TableName> {
+        match self {
+            ColumnLabel::None => None,
+            ColumnLabel::Unqualified(_) => None,
+            ColumnLabel::Qualified(table, _) => Some(table),
+        }
+    }
+    pub fn column_name(&self) -> Option<&ColumnName> {
+        match self {
+            ColumnLabel::None => None,
+            ColumnLabel::Unqualified(name) => Some(name),
+            ColumnLabel::Qualified(_, name) => Some(name),
+        }
+    }
+}
+
+impl TryFrom<&ast::ObjectName> for ColumnLabel {
+    type Error = Error;
+
+    fn try_from(value: &ast::ObjectName) -> Result<Self, Self::Error> {
+        if value.0.len() == 1 {
+            Ok(ColumnLabel::Unqualified(ColumnName::new(
+                value.0[0].to_string(),
+            )))
+        } else if value.0.len() == 2 {
+            Ok(ColumnLabel::Qualified(
+                TableName::new(value.0[0].to_string()),
+                ColumnName::new(value.0[1].to_string()),
+            ))
+        } else {
+            Err(Error::InvalidColumnLabel(value.to_string()))
+        }
+    }
 }
 
 impl std::fmt::Display for ColumnLabel {

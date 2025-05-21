@@ -1,7 +1,7 @@
-use sqlparser::ast;
+use std::fmt::{self};
 
 use crate::{
-    engine::{Catalog, Transaction},
+    engine::Transaction,
     error::Error,
     types::{
         schema::{ColumnIndex, Table, TableName},
@@ -9,317 +9,284 @@ use crate::{
     },
 };
 
-use super::{Executor, expr::Expr, scope::Scope, session::StatementResult};
+use super::{Executor, aggregate::Aggregate, expr::Expr, join::JoinType, session::StatementResult};
 
-pub struct Planner<'a, C: Catalog> {
-    catalog: &'a C,
-}
-
-impl<'a, C: Catalog> Planner<'a, C> {
-    pub fn new(catalog: &'a C) -> Self {
-        Self { catalog }
-    }
-
-    pub fn plan(&self, statement: &ast::Statement) -> Result<Plan, Error> {
-        match statement {
-            ast::Statement::CreateTable(stmt) => self.plan_create_table(stmt),
-            ast::Statement::Drop {
-                object_type, names, ..
-            } => {
-                if object_type == &ast::ObjectType::Table {
-                    if let Some(name) = names.first() {
-                        let table = name.to_string();
-                        return self.plan_drop_table(&table);
-                    }
-                }
-                Err(Error::NotYetSupported(statement.to_string()))
-            }
-            // ast::Statement::Delete(stmt) => self.plan_delete(stmt),
-            ast::Statement::Insert(stmt) => self.plan_insert(stmt),
-            ast::Statement::Query(stmt) => self.plan_select(stmt),
-            // ast::Statement::List(stmt) => self.plan_list(stmt),
-            stmt => Err(Error::NotYetSupported(stmt.to_string())),
-        }
-    }
-
-    fn plan_create_table(&self, table: &ast::CreateTable) -> Result<Plan, Error> {
-        let table = Table::try_from(table).map_err(|e| Error::FromAstError(e.to_string()))?;
-        Ok(Plan::CreateTable(table))
-    }
-
-    fn plan_drop_table(&self, table: &str) -> Result<Plan, Error> {
-        let table = TableName::new(table.to_string());
-        Ok(Plan::DropTable(table))
-    }
-
-    fn plan_insert(&self, stmt: &ast::Insert) -> Result<Plan, Error> {
-        let table = {
-            let ast::TableObject::TableName(ref name) = stmt.table else {
-                return Err(Error::NotYetSupported(stmt.to_string()));
-            };
-            TableName::new(name.to_string())
-        };
-        let table = self
-            .catalog
-            .get_table(&table)?
-            .ok_or_else(|| Error::TableDoesNotExist(table.clone()))?;
-        let source = if let Some(source) = stmt.source.as_deref() {
-            Node::from_query(source, self.catalog)?
-        } else {
-            return Err(Error::NotYetSupported(stmt.to_string()));
-        };
-        Ok(Plan::Insert { table, source })
-    }
-
-    fn plan_select(&self, stmt: &ast::Query) -> Result<Plan, Error> {
-        let node = Node::from_query(stmt, self.catalog)?;
-        Ok(Plan::Select(node))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     CreateTable(Table),
     DropTable(TableName),
-    Delete {
-        table: TableName,
-        primary_key: ColumnIndex,
-        source: Node,
-    },
     Insert {
         table: Table,
-        source: Node,
+        source: Box<Plan>,
     },
-    Select(Node),
-}
-
-impl Plan {
-    pub fn execute(self, txn: &impl Transaction) -> Result<StatementResult, Error> {
-        Executor::new(txn).execute(self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Node {
-    Values {
-        rows: Vec<Vec<Expr>>,
+    Delete {
+        table: Table,
+        source: Expr,
+    },
+    Query(Box<Plan>),
+    Aggregate {
+        source: Box<Plan>,
+        group_by: Vec<Expr>,
+        aggregates: Vec<Aggregate>,
+    },
+    Filter {
+        source: Box<Plan>,
+        predicate: Expr,
+    },
+    Join {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        on: Option<Expr>,
+        join_type: JoinType,
+    },
+    Nothing {
+        columns: Vec<ColumnLabel>,
+    },
+    Project {
+        source: Box<Plan>,
+        columns: Vec<Expr>,
+        aliases: Vec<ColumnLabel>,
+    },
+    Remap {
+        source: Box<Plan>,
+        targets: Vec<Option<ColumnIndex>>,
     },
     Scan {
         table: Table,
         filter: Option<Expr>,
+        alias: Option<TableName>,
     },
-    Filter {
-        source: Box<Node>,
-        predicate: Expr,
-    },
-    Project {
-        source: Box<Node>,
-        expressions: Vec<Expr>,
-    },
-    HashJoin {
-        left: Box<Node>,
-        left_col: ColumnIndex,
-        right: Box<Node>,
-        right_col: ColumnIndex,
-        outer: bool,
-    },
-    NestedLoopJoin {
-        left: Box<Node>,
-        right: Box<Node>,
-        predicate: Option<Expr>,
-        outer: bool,
+    Values {
+        rows: Vec<Vec<Expr>>,
     },
 }
 
-impl Node {
+impl Plan {
+    pub fn execute(self, transaction: &impl Transaction) -> Result<StatementResult, Error> {
+        println!("Executing plan: {}", self);
+        Executor::new(transaction).execute(self)
+    }
+
     pub fn num_columns(&self) -> usize {
         match self {
-            Self::Scan { table, .. } => table.columns.len(),
-            Self::Values { rows } => rows.first().map(|row| row.len()).unwrap_or(0),
-            Self::Filter { source, .. } => source.num_columns(),
-            Self::Project { expressions, .. } => expressions.len(),
-            Self::HashJoin { left, right, .. } | Self::NestedLoopJoin { left, right, .. } => {
-                left.num_columns() + right.num_columns()
-            }
+            Plan::CreateTable { .. } => 0,
+            Plan::DropTable { .. } => 0,
+            Plan::Delete { .. } => 0,
+            Plan::Insert { source, .. } => source.num_columns(),
+            Plan::Query(source) => source.num_columns(),
+            Plan::Aggregate {
+                group_by,
+                aggregates,
+                ..
+            } => group_by.len() + aggregates.len(),
+            Plan::Filter { source, .. } => source.num_columns(),
+            Plan::Join { left, right, .. } => left.num_columns() + right.num_columns(),
+            Plan::Nothing { columns } => columns.len(),
+            Plan::Project { columns, .. } => columns.len(),
+            Plan::Remap { targets, .. } => targets
+                .iter()
+                .flatten()
+                .cloned()
+                .map(|t| t.into_inner() + 1)
+                .max()
+                .unwrap_or(0),
+            Plan::Scan { table, .. } => table.columns.len(),
+            Plan::Values { rows } => rows.first().map_or(0, |r| r.len()),
         }
     }
 
     pub fn column_label(&self, index: &ColumnIndex) -> ColumnLabel {
         match self {
-            Self::Scan { table, .. } => {
-                let column = &table.columns[*index.inner()];
-                ColumnLabel::Qualified(table.name.clone(), column.name.clone())
-            }
-            Self::Values { .. } => ColumnLabel::None,
-            Self::Filter { source, .. } => source.column_label(index),
-            Self::Project {
-                source,
-                expressions,
-            } => match expressions.get(*index.inner()) {
-                Some(Expr::Column(index)) => source.column_label(index),
+            Plan::CreateTable { .. } => ColumnLabel::None,
+            Plan::DropTable { .. } => ColumnLabel::None,
+            Plan::Delete { .. } => ColumnLabel::None,
+            Plan::Insert { source, .. } => source.column_label(index),
+            Plan::Query(source) => source.column_label(index),
+            Plan::Aggregate {
+                source, group_by, ..
+            } => match group_by.get(**index) {
+                Some(Expr::Column(i)) => source.column_label(i),
                 Some(_) | None => ColumnLabel::None,
             },
-            Self::HashJoin { left, right, .. } | Self::NestedLoopJoin { left, right, .. } => {
-                if *index.inner() < left.num_columns() {
-                    left.column_label(index)
-                } else {
-                    right.column_label(&(index.clone() - left.num_columns()))
+            Plan::Filter { source, .. } => source.column_label(index),
+            Plan::Join {
+                left,
+                right,
+                join_type,
+                ..
+            } => match join_type {
+                JoinType::Inner => {
+                    if index.inner() < &left.num_columns() {
+                        left.column_label(index)
+                    } else {
+                        right.column_label(&ColumnIndex::new(index.inner() - left.num_columns()))
+                    }
                 }
-            }
+                JoinType::Left => {
+                    if index.inner() < &left.num_columns() {
+                        left.column_label(index)
+                    } else {
+                        right.column_label(&ColumnIndex::new(index.inner() - left.num_columns()))
+                    }
+                }
+                JoinType::Right => {
+                    if index.inner() < &right.num_columns() {
+                        right.column_label(index)
+                    } else {
+                        left.column_label(&ColumnIndex::new(index.inner() - right.num_columns()))
+                    }
+                }
+            },
+            Plan::Nothing { columns } => columns
+                .get(*index.inner())
+                .cloned()
+                .unwrap_or(ColumnLabel::None),
+            Plan::Project {
+                source,
+                columns,
+                aliases,
+            } => match aliases.get(*index.inner()) {
+                Some(ColumnLabel::None) | None => match columns.get(*index.inner()) {
+                    Some(Expr::Column(i)) => source.column_label(i),
+                    Some(_) | None => ColumnLabel::None,
+                },
+                Some(label) => label.clone(),
+            },
+            Plan::Remap { source, targets } => targets
+                .iter()
+                .cloned()
+                .position(|t| t.as_ref() == Some(index))
+                .map(|i| source.column_label(&ColumnIndex::new(i)))
+                .unwrap_or(ColumnLabel::None),
+            Plan::Scan { table, alias, .. } => ColumnLabel::Qualified(
+                alias.clone().unwrap_or_else(|| table.name.clone()),
+                table.columns[**index].name.clone(),
+            ),
+            Plan::Values { .. } => ColumnLabel::None,
         }
     }
 
-    pub fn from_query(query: &ast::Query, catalog: &impl Catalog) -> Result<Self, Error> {
-        let node = match &*query.body {
-            ast::SetExpr::Values(vals) => Self::from_values(vals)?,
-            ast::SetExpr::Select(select) => Self::from_select(select, catalog)?,
-            _ => return Err(Error::NotYetSupported(query.to_string())),
-        };
-
-        Ok(node)
-    }
-
-    fn from_values(vals: &ast::Values) -> Result<Self, Error> {
-        let scope = Scope::default();
-        let mut rows = Vec::new();
-        for row in &vals.rows {
-            let mut exprs = Vec::new();
-            for expr in row {
-                let expr = Expr::build(expr, &scope)?;
-                exprs.push(expr);
-            }
-            rows.push(exprs);
-        }
-        Ok(Node::Values { rows })
-    }
-
-    fn from_select(select: &ast::Select, catalog: &impl Catalog) -> Result<Self, Error> {
-        let mut scope = Scope::default();
-        if select.from.is_empty() {
-            return Err(Error::InvalidSql(select.to_string()));
-        }
-
-        let mut node = Self::from_from(&select.from[0], &mut scope, catalog)?;
-        for from in select.from.iter().skip(1) {
-            let right = Self::from_from(from, &mut scope, catalog)?;
-            node = Node::NestedLoopJoin {
-                left: Box::new(node),
-                right: Box::new(right),
-                predicate: None,
-                outer: false,
-            };
-        }
-
-        if let Some(where_clause) = &select.selection {
-            node = Node::Filter {
-                source: Box::new(node),
-                predicate: Expr::build(where_clause, &scope)?,
-            }
-        };
-        let mut expressions = Vec::new();
-        if select.projection.len() == 1
-            && matches!(
-                select.projection.first(),
-                Some(ast::SelectItem::Wildcard(_))
-            )
-        {
-            return Ok(node);
+    pub fn format(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        prefix: &str,
+        root: bool,
+        last_child: bool,
+    ) -> fmt::Result {
+        let prefix = if !last_child {
+            write!(f, "{}├── ", prefix)?;
+            format!("{}│   ", prefix)
+        } else if !root {
+            write!(f, "{}└── ", prefix)?;
+            format!("{}    ", prefix)
         } else {
-            for item in &select.projection {
-                match item {
-                    ast::SelectItem::UnnamedExpr(expr) => {
-                        let expr = Expr::build(expr, &scope)?;
-                        expressions.push(expr);
-                    }
-                    _ => {
-                        return Err(Error::NotYetSupported(item.to_string()));
-                    }
-                }
-            }
-            node = Node::Project {
-                source: Box::new(node),
-                expressions,
-            };
-        }
-
-        Ok(node)
-    }
-
-    fn from_relation(
-        relation: &ast::TableFactor,
-        scope: &mut Scope,
-        catalog: &impl Catalog,
-    ) -> Result<Node, Error> {
-        let node = match relation {
-            ast::TableFactor::Table { name, alias, .. } => {
-                let table_name = TableName::new(name.to_string());
-                let table = catalog
-                    .get_table(&table_name)?
-                    .ok_or(Error::TableDoesNotExist(table_name))?;
-                let alias = alias.as_ref().map(|a| TableName::new(a.name.value.clone()));
-                scope.add_table(&table, alias.as_ref())?;
-                Node::Scan {
-                    table,
-                    filter: None,
-                }
-            }
-            ast::TableFactor::NestedJoin {
-                table_with_joins,
-                alias,
-            } => {
-                assert!(alias.is_none());
-                Self::from_from(table_with_joins, scope, catalog)?
-            }
-            _ => return Err(Error::NotYetSupported(format!("{relation:?}"))),
+            write!(f, "{}", prefix)?;
+            prefix.to_string()
         };
 
-        Ok(node)
-    }
-
-    fn from_from(
-        from: &ast::TableWithJoins,
-        scope: &mut Scope,
-        catalog: &impl Catalog,
-    ) -> Result<Node, Error> {
-        let mut node = Self::from_relation(&from.relation, scope, catalog)?;
-
-        for join in &from.joins {
-            let right = Self::from_relation(&join.relation, scope, catalog)?;
-            let mut predicate = None;
-            match &join.join_operator {
-                ast::JoinOperator::Join(constraint) => match constraint {
-                    ast::JoinConstraint::None => {}
-                    ast::JoinConstraint::On(expr) => {
-                        predicate = Some(Expr::build(expr, scope)?);
-                    }
-                    _ => {
-                        return Err(Error::NotYetSupported(join.to_string()));
-                    }
-                },
-                ast::JoinOperator::Left(constraint) => match constraint {
-                    ast::JoinConstraint::None => {}
-                    ast::JoinConstraint::On(expr) => {
-                        predicate = Some(Expr::build(expr, scope)?);
-                    }
-                    _ => {
-                        return Err(Error::NotYetSupported(join.to_string()));
-                    }
-                },
-                ast::JoinOperator::CrossJoin => {
-                    // Cross join does not have an ON clause
-                }
-                _ => {
-                    return Err(Error::NotYetSupported(join.to_string()));
+        match self {
+            Plan::CreateTable(table) => {
+                writeln!(f, "CreateTable: {}", table.name)?;
+                for column in &table.columns {
+                    writeln!(f, "{}  └── {:?}", prefix, column)?;
                 }
             }
-            node = Node::NestedLoopJoin {
-                left: Box::new(node),
-                right: Box::new(right),
-                predicate,
-                outer: false,
-            };
+            Plan::DropTable(table) => {
+                writeln!(f, "DropTable: {}", table)?;
+            }
+            Plan::Insert { table, source } => {
+                writeln!(f, "Insert: {}", table.name)?;
+                source.format(f, &prefix, false, true)?;
+            }
+            Plan::Delete { table, source } => {
+                writeln!(f, "Delete: {}", table.name)?;
+                writeln!(f, "{}  └── {}", prefix, source)?;
+            }
+            Plan::Query(source) => {
+                writeln!(f, "Query")?;
+                source.format(f, &prefix, false, true)?;
+            }
+            Plan::Aggregate {
+                source,
+                group_by,
+                aggregates,
+            } => {
+                writeln!(f, "Aggregate")?;
+                for expr in group_by {
+                    writeln!(f, "{}  ├── {}", prefix, expr)?;
+                }
+                for aggregate in aggregates {
+                    writeln!(f, "{}  └── {}", prefix, aggregate)?;
+                }
+                source.format(f, &prefix, false, true)?;
+            }
+            Plan::Filter { source, predicate } => {
+                writeln!(f, "Filter: {}", predicate)?;
+                source.format(f, &prefix, false, true)?;
+            }
+            Plan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => {
+                writeln!(
+                    f,
+                    "Join: {} ({:?})",
+                    on.as_ref().map_or("None".to_string(), |e| e.to_string()),
+                    join_type
+                )?;
+                left.format(f, &prefix, false, false)?;
+                right.format(f, &prefix, false, true)?;
+            }
+            Plan::Nothing { columns } => {
+                writeln!(f, "Nothing")?;
+                for column in columns {
+                    writeln!(f, "{}  └── {}", prefix, column)?;
+                }
+            }
+            Plan::Project {
+                source,
+                columns,
+                aliases,
+            } => {
+                writeln!(f, "Project")?;
+                for (i, column) in columns.iter().enumerate() {
+                    writeln!(f, "{}  ├── {}: {}", prefix, aliases[i], column)?;
+                }
+                source.format(f, &prefix, false, true)?;
+            }
+            Plan::Remap { source, targets } => {
+                writeln!(f, "Remap")?;
+                for target in targets {
+                    if let Some(target) = target {
+                        writeln!(f, "{}  ├── {:?}", prefix, target)?;
+                    } else {
+                        writeln!(f, "{}  └── None", prefix)?;
+                    }
+                }
+                source.format(f, &prefix, false, true)?;
+            }
+            Plan::Scan {
+                table: _,
+                filter: _,
+                alias: _,
+            } => {
+                writeln!(f, "Scan")?;
+            }
+            Plan::Values { rows } => {
+                writeln!(f, "Values")?;
+                for row in rows {
+                    writeln!(f, "{}  └── {:?}", prefix, row)?;
+                }
+            }
         }
 
-        Ok(node)
+        Ok(())
+    }
+}
+
+impl fmt::Display for Plan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.format(f, "", true, true)
     }
 }

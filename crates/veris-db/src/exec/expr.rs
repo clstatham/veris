@@ -1,134 +1,185 @@
+use std::fmt;
+
 use sqlparser::ast;
 
 use crate::{
     error::Error,
     types::{
-        schema::{ColumnIndex, ColumnName, TableName},
+        schema::ColumnIndex,
         value::{Row, Value},
     },
 };
-
-use super::scope::Scope;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Expr {
     Constant(Value),
     Column(ColumnIndex),
-    Equal(Box<Expr>, Box<Expr>),
-    NotEqual(Box<Expr>, Box<Expr>),
-    Greater(Box<Expr>, Box<Expr>),
-    GreaterEqual(Box<Expr>, Box<Expr>),
-    Less(Box<Expr>, Box<Expr>),
-    LessEqual(Box<Expr>, Box<Expr>),
+    BinaryOp(Box<Expr>, BinaryOp, Box<Expr>),
 }
 
 impl Expr {
-    pub fn build(expr: &ast::Expr, scope: &Scope) -> Result<Self, Error> {
-        match expr {
-            ast::Expr::Value(v) => Ok(Expr::Constant(Value::try_from_ast(&v.value, None)?)),
-            ast::Expr::BinaryOp { left, op, right } => {
-                let lhs = Box::new(Expr::build(left, scope)?);
-                let rhs = Box::new(Expr::build(right, scope)?);
-                match op {
-                    ast::BinaryOperator::Eq => Ok(Expr::Equal(lhs, rhs)),
-                    ast::BinaryOperator::NotEq => Ok(Expr::NotEqual(lhs, rhs)),
-                    ast::BinaryOperator::Gt => Ok(Expr::Greater(lhs, rhs)),
-                    ast::BinaryOperator::GtEq => Ok(Expr::GreaterEqual(lhs, rhs)),
-                    ast::BinaryOperator::Lt => Ok(Expr::Less(lhs, rhs)),
-                    ast::BinaryOperator::LtEq => Ok(Expr::LessEqual(lhs, rhs)),
-                    _ => Err(Error::NotYetSupported(expr.to_string())),
-                }
-            }
-            ast::Expr::Identifier(ident) => {
-                let column = scope
-                    .get_column_index(None, &ColumnName::new(ident.value.clone()))
-                    .ok_or(Error::ColumnNotFound(ident.value.clone()))?;
-                Ok(Expr::Column(column))
-            }
-            ast::Expr::CompoundIdentifier(idents) => {
-                assert_eq!(idents.len(), 2);
-                let column = scope
-                    .get_column_index(
-                        Some(&TableName::new(idents[0].value.clone())),
-                        &ColumnName::new(idents[1].value.clone()),
-                    )
-                    .ok_or(Error::ColumnNotFound(format!(
-                        "{}.{}",
-                        &idents[0].value, &idents[1].value
-                    )))?;
-
-                Ok(Expr::Column(column))
-            }
-            _ => Err(Error::NotYetSupported(expr.to_string())),
-        }
-    }
-
-    pub fn evaluate(&self, row: Option<&Row>) -> Result<Value, Error> {
+    pub fn eval(&self, row: Option<&Row>) -> Result<Value, Error> {
         match self {
             Expr::Constant(value) => Ok(value.clone()),
             Expr::Column(index) => {
                 if let Some(row) = row {
-                    row.get(*index.inner())
+                    Ok(row
+                        .get(**index)
                         .cloned()
-                        .ok_or(Error::InvalidColumnIndex(index.clone(), row.clone()))
+                        .ok_or(Error::InvalidColumnIndex(index.clone()))?)
                 } else {
                     Err(Error::RowNotFound)
                 }
             }
-            Expr::Equal(lhs, rhs) => {
-                let lhs_value = lhs.evaluate(row)?;
-                let rhs_value = rhs.evaluate(row)?;
-                if lhs_value == rhs_value {
-                    Ok(Value::Boolean(true))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
+            Expr::BinaryOp(a, op, b) => {
+                let a = a.eval(row)?;
+                let b = b.eval(row)?;
+                let result = match op {
+                    BinaryOp::Add => a.checked_add(&b)?,
+                    BinaryOp::Subtract => a.checked_sub(&b)?,
+                    BinaryOp::Multiply => a.checked_mul(&b)?,
+                    BinaryOp::Divide => a.checked_div(&b)?,
+                    BinaryOp::Equal => {
+                        if a == b {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::NotEqual => {
+                        if a != b {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::GreaterThan => {
+                        if a > b {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::LessThan => {
+                        if a < b {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::GreaterThanOrEqual => {
+                        if a >= b {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::LessThanOrEqual => {
+                        if a <= b {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::And => {
+                        if a.is_truthy() && b.is_truthy() {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+                    BinaryOp::Or => {
+                        if a.is_truthy() || b.is_truthy() {
+                            Value::Boolean(true)
+                        } else {
+                            Value::Boolean(false)
+                        }
+                    }
+
+                    _ => {
+                        return Err(Error::NotYetSupported(format!(
+                            "Binary operator {:?} not yet supported",
+                            op
+                        )));
+                    }
+                };
+                Ok(result)
             }
-            Expr::NotEqual(lhs, rhs) => {
-                let lhs_value = lhs.evaluate(row)?;
-                let rhs_value = rhs.evaluate(row)?;
-                if lhs_value != rhs_value {
-                    Ok(Value::Boolean(true))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
+        }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Constant(value) => write!(f, "{}", value),
+            Expr::Column(index) => write!(f, "{}", index),
+            Expr::BinaryOp(left, op, right) => {
+                write!(f, "({} {} {})", left, op, right)
             }
-            Expr::Greater(lhs, rhs) => {
-                let lhs_value = lhs.evaluate(row)?;
-                let rhs_value = rhs.evaluate(row)?;
-                if lhs_value > rhs_value {
-                    Ok(Value::Boolean(true))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
-            }
-            Expr::GreaterEqual(lhs, rhs) => {
-                let lhs_value = lhs.evaluate(row)?;
-                let rhs_value = rhs.evaluate(row)?;
-                if lhs_value >= rhs_value {
-                    Ok(Value::Boolean(true))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
-            }
-            Expr::Less(lhs, rhs) => {
-                let lhs_value = lhs.evaluate(row)?;
-                let rhs_value = rhs.evaluate(row)?;
-                if lhs_value < rhs_value {
-                    Ok(Value::Boolean(true))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
-            }
-            Expr::LessEqual(lhs, rhs) => {
-                let lhs_value = lhs.evaluate(row)?;
-                let rhs_value = rhs.evaluate(row)?;
-                if lhs_value <= rhs_value {
-                    Ok(Value::Boolean(true))
-                } else {
-                    Ok(Value::Boolean(false))
-                }
-            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulus,
+    And,
+    Or,
+    Equal,
+    NotEqual,
+    GreaterThan,
+    LessThan,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+}
+
+impl TryFrom<&ast::BinaryOperator> for BinaryOp {
+    type Error = Error;
+
+    fn try_from(value: &ast::BinaryOperator) -> Result<Self, Self::Error> {
+        match value {
+            ast::BinaryOperator::Plus => Ok(BinaryOp::Add),
+            ast::BinaryOperator::Minus => Ok(BinaryOp::Subtract),
+            ast::BinaryOperator::Multiply => Ok(BinaryOp::Multiply),
+            ast::BinaryOperator::Divide => Ok(BinaryOp::Divide),
+            ast::BinaryOperator::Modulo => Ok(BinaryOp::Modulus),
+            ast::BinaryOperator::And => Ok(BinaryOp::And),
+            ast::BinaryOperator::Or => Ok(BinaryOp::Or),
+            ast::BinaryOperator::Eq => Ok(BinaryOp::Equal),
+            ast::BinaryOperator::NotEq => Ok(BinaryOp::NotEqual),
+            ast::BinaryOperator::Gt => Ok(BinaryOp::GreaterThan),
+            ast::BinaryOperator::Lt => Ok(BinaryOp::LessThan),
+            ast::BinaryOperator::GtEq => Ok(BinaryOp::GreaterThanOrEqual),
+            ast::BinaryOperator::LtEq => Ok(BinaryOp::LessThanOrEqual),
+            _ => Err(Error::NotYetSupported(format!(
+                "Binary operator {:?} not supported",
+                value
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for BinaryOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BinaryOp::Add => write!(f, "+"),
+            BinaryOp::Subtract => write!(f, "-"),
+            BinaryOp::Multiply => write!(f, "*"),
+            BinaryOp::Divide => write!(f, "/"),
+            BinaryOp::Modulus => write!(f, "%"),
+            BinaryOp::And => write!(f, "AND"),
+            BinaryOp::Or => write!(f, "OR"),
+            BinaryOp::Equal => write!(f, "="),
+            BinaryOp::NotEqual => write!(f, "<>"),
+            BinaryOp::GreaterThan => write!(f, ">"),
+            BinaryOp::LessThan => write!(f, "<"),
+            BinaryOp::GreaterThanOrEqual => write!(f, ">="),
+            BinaryOp::LessThanOrEqual => write!(f, "<="),
         }
     }
 }

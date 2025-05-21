@@ -283,7 +283,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             return Ok(Box::new(rows));
         };
         let rows = rows.filter_map(move |res| {
-            res.and_then(|row| match filter.evaluate(Some(&row))? {
+            res.and_then(|row| match filter.eval(Some(&row))? {
                 Value::Boolean(true) => Ok(Some(row)),
                 Value::Boolean(false) => Ok(None),
                 value => Err(Error::InvalidFilterResult(value)),

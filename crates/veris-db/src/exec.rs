@@ -1,20 +1,25 @@
+use aggregate::{Aggregate, Aggregator};
+use expr::Expr;
 use itertools::Itertools;
-use join::{HashJoiner, NestedLoopJoiner};
-use plan::{Node, Plan};
+
+use join::{JoinType, NestedLoopJoiner};
+use plan::Plan;
 use session::StatementResult;
 
 use crate::{
     engine::Transaction,
     error::Error,
     types::{
-        schema::{ColumnIndex, Table, TableName},
+        schema::{ColumnIndex, Table},
         value::{Row, Rows, Value},
     },
 };
 
+pub mod aggregate;
 pub mod expr;
 pub mod join;
 pub mod plan;
+pub mod planner;
 pub mod scope;
 pub mod session;
 
@@ -39,110 +44,25 @@ impl<'a, T: Transaction> Executor<'a, T> {
                 Ok(StatementResult::DropTable(table))
             }
             Plan::Insert { table, source } => {
-                let source = self.execute_node(source)?;
+                let source = self.execute_inner(*source)?;
                 let count = self.insert(table, source)?;
                 Ok(StatementResult::Insert(count))
             }
-            Plan::Delete {
-                table,
-                primary_key,
-                source,
-            } => {
-                let source = self.execute_node(source)?;
-                let count = self.delete(table, primary_key, source)?;
-                Ok(StatementResult::Delete(count))
-            }
-            Plan::Select(node) => {
+            Plan::Query(node) => {
                 let mut columns = Vec::new();
-                for col in 0..node.num_columns() {
-                    columns.push(node.column_label(&ColumnIndex::new(col)));
+                for i in 0..node.num_columns() {
+                    let label = node.column_label(&ColumnIndex::new(i));
+                    columns.push(label.clone());
                 }
-                let rows = self.execute_node(node)?;
 
-                Ok(StatementResult::Select {
+                let rows = self.execute_inner(*node)?;
+
+                Ok(StatementResult::Query {
                     rows: rows.try_collect()?,
                     columns,
                 })
             }
-        }
-    }
-
-    fn execute_node(&mut self, node: Node) -> Result<Rows, Error> {
-        dbg!(&node);
-        match node {
-            Node::Values { rows } => {
-                Ok(Box::new(rows.into_iter().map(|row| {
-                    row.into_iter().map(|expr| expr.evaluate(None)).collect()
-                })))
-            }
-            Node::Scan { table, filter } => Ok(self.txn.scan(&table.name, filter)?),
-            Node::Filter { source, predicate } => {
-                let source = self.execute_node(*source)?;
-                let mut rows = Vec::new();
-                for source_row in source {
-                    match source_row {
-                        Ok(source_row) => {
-                            let result = predicate.evaluate(Some(&source_row))?;
-                            match result {
-                                Value::Boolean(true) => rows.push(Ok(source_row)),
-                                Value::Boolean(false) => continue,
-                                result => {
-                                    return Err(Error::InvalidFilterResult(result));
-                                }
-                            }
-                        }
-                        Err(e) => rows.push(Err(e)),
-                    }
-                }
-
-                Ok(Box::new(rows.into_iter()))
-            }
-            Node::Project {
-                source,
-                expressions,
-            } => {
-                let source = self.execute_node(*source)?;
-                Ok(Box::new(source.into_iter().map(move |res| {
-                    let row = res?;
-                    expressions
-                        .iter()
-                        .map(|expr| expr.evaluate(Some(&row)))
-                        .collect()
-                })))
-            }
-            Node::HashJoin {
-                left,
-                left_col: left_column,
-                right,
-                right_col: right_column,
-                outer,
-            } => {
-                let right_cols = right.num_columns();
-                let left = self.execute_node(*left)?;
-                let right = self.execute_node(*right)?;
-                Ok(Box::new(HashJoiner::new(
-                    left,
-                    left_column,
-                    right,
-                    right_column,
-                    right_cols,
-                    outer,
-                )?))
-            }
-            Node::NestedLoopJoin {
-                left,
-                right,
-                predicate,
-                outer,
-            } => {
-                let right_cols = right.num_columns();
-                let left = self.execute_node(*left)?;
-                let right = self.execute_node(*right)?;
-
-                Ok(Box::new(NestedLoopJoiner::new(
-                    left, right, right_cols, predicate, outer,
-                )))
-            }
+            _ => Err(Error::InvalidPlan),
         }
     }
 
@@ -156,7 +76,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
             for (i, value) in values.iter().enumerate() {
                 casted_row.push(value.try_cast(&table.columns[i].data_type)?);
             }
-            rows.push(Row::from(casted_row.into_boxed_slice()));
+            rows.push(Row::from(casted_row));
         }
 
         let count = rows.len();
@@ -164,24 +84,133 @@ impl<'a, T: Transaction> Executor<'a, T> {
         Ok(count)
     }
 
-    fn delete(
-        &mut self,
-        table: TableName,
-        primary_key: ColumnIndex,
-        source: Rows,
-    ) -> Result<usize, Error> {
-        let ids: Vec<Value> = source
-            .into_iter()
-            .map_ok(|row| {
-                row.into_iter()
-                    .nth(*primary_key.inner())
-                    .ok_or(Error::InvalidRowState)
-            })
-            .flatten_ok()
-            .try_collect()?;
+    fn execute_inner(&mut self, plan: Plan) -> Result<Rows, Error> {
+        match plan {
+            Plan::Query(node) => self.execute_inner(*node),
+            Plan::Values { rows } => self.execute_values(rows),
+            Plan::Scan { table, filter, .. } => self.execute_scan(table, filter),
+            Plan::Join {
+                left,
+                right,
+                on,
+                join_type,
+            } => self.execute_join(*left, *right, join_type, on),
+            Plan::Aggregate {
+                source,
+                group_by,
+                aggregates,
+            } => self.execute_aggregate(*source, group_by, aggregates),
+            Plan::Filter { source, predicate } => self.execute_filter(*source, predicate),
+            Plan::Project {
+                source, columns, ..
+            } => self.execute_project(*source, columns),
+            Plan::Remap { source, targets } => self.execute_remap(*source, targets),
+            Plan::Nothing { .. } => Ok(Box::new(std::iter::empty())),
+            _ => Err(Error::InvalidPlan),
+        }
+    }
 
-        let count = ids.len();
-        self.txn.delete(&table, &ids)?;
-        Ok(count)
+    fn execute_values(&mut self, rows: Vec<Vec<Expr>>) -> Result<Rows, Error> {
+        let mut result = Vec::new();
+        for row in rows {
+            let mut values = Vec::new();
+            for expr in row {
+                values.push(expr.eval(None)?);
+            }
+            result.push(Row::from(values));
+        }
+        Ok(Box::new(result.into_iter().map(Ok)))
+    }
+
+    fn execute_scan(&mut self, table: Table, filter: Option<Expr>) -> Result<Rows, Error> {
+        let rows = self.txn.scan(&table.name, filter)?;
+        Ok(rows)
+    }
+
+    fn execute_join(
+        &mut self,
+        left: Plan,
+        right: Plan,
+        join_type: JoinType,
+        on: Option<Expr>,
+    ) -> Result<Rows, Error> {
+        let left_cols = left.num_columns();
+        let right_cols = right.num_columns();
+        let left = self.execute_inner(left)?;
+        let right = self.execute_inner(right)?;
+
+        let joiner = NestedLoopJoiner::new(left, right, left_cols, right_cols, on, join_type);
+
+        Ok(Box::new(joiner))
+    }
+
+    fn execute_aggregate(
+        &mut self,
+        source: Plan,
+        group_by: Vec<Expr>,
+        aggregates: Vec<Aggregate>,
+    ) -> Result<Rows, Error> {
+        let source = self.execute_inner(source)?;
+        let mut aggregator = Aggregator::new(group_by, aggregates);
+        for row in source {
+            let row = row?;
+            aggregator.add_row(&row)?;
+        }
+        let result = aggregator.finish()?;
+        Ok(result)
+    }
+
+    fn execute_filter(&mut self, source: Plan, predicate: Expr) -> Result<Rows, Error> {
+        let source = self.execute_inner(source)?;
+        let mut result = Vec::new();
+        for row in source {
+            let row = row?;
+            if predicate
+                .eval(Some(&row))
+                .map(|v| v.is_truthy())
+                .unwrap_or(false)
+            {
+                result.push(row);
+            }
+        }
+        Ok(Box::new(result.into_iter().map(Ok)))
+    }
+
+    fn execute_project(&mut self, source: Plan, columns: Vec<Expr>) -> Result<Rows, Error> {
+        let source = self.execute_inner(source)?;
+        let mut result = Vec::new();
+        for row in source {
+            let row = row?;
+            let mut projected_row = Vec::new();
+            for expr in &columns {
+                projected_row.push(expr.eval(Some(&row))?);
+            }
+            result.push(Row::from(projected_row));
+        }
+        Ok(Box::new(result.into_iter().map(Ok)))
+    }
+
+    fn execute_remap(
+        &mut self,
+        source: Plan,
+        targets: Vec<Option<ColumnIndex>>,
+    ) -> Result<Rows, Error> {
+        let source = self.execute_inner(source)?;
+        let size = targets
+            .iter()
+            .flatten()
+            .cloned()
+            .map(|i| i.into_inner() + 1)
+            .max()
+            .unwrap_or(0);
+        Ok(Box::new(source.map_ok(move |row| {
+            let mut new_row = vec![Value::Null; size];
+            for (i, target) in targets.iter().enumerate() {
+                if let Some(target) = target {
+                    new_row[**target] = row[i].clone();
+                }
+            }
+            Row::from(new_row)
+        })))
     }
 }

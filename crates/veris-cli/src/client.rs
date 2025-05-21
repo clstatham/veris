@@ -155,7 +155,8 @@ impl Client {
     pub fn handle_response(&self, resp: Response) -> Result<(), ClientError> {
         match resp {
             Response::Execute(resps) => {
-                for resp in resps {
+                for (request, resp) in resps {
+                    println!("> {request}");
                     match resp {
                         StatementResult::Error(e) => {
                             println!("Error: {e}");
@@ -175,7 +176,7 @@ impl Client {
                                 ascii_table.print(vec![data]);
                             }
                         }
-                        StatementResult::Select { rows, columns } => {
+                        StatementResult::Query { rows, columns } => {
                             let mut ascii_table = AsciiTable::default();
                             for (i, column) in columns.iter().enumerate() {
                                 ascii_table
@@ -216,6 +217,8 @@ impl Client {
                         }
                         StatementResult::Null => {}
                     }
+
+                    println!();
                 }
             }
             Response::Error(resp) => {
@@ -225,6 +228,7 @@ impl Client {
                 println!("{resp}")
             }
         }
+
         Ok(())
     }
 }

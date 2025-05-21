@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
@@ -10,7 +12,7 @@ use crate::{
     },
 };
 
-use super::plan::Planner;
+use super::planner::Planner;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum StatementResult {
@@ -26,10 +28,28 @@ pub enum StatementResult {
     },
     Delete(usize),
     Insert(usize),
-    Select {
+    Query {
         rows: Vec<Row>,
         columns: Vec<ColumnLabel>,
     },
+}
+
+impl fmt::Display for StatementResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StatementResult::Null => write!(f, "NULL"),
+            StatementResult::Error(err) => write!(f, "Error: {}", err),
+            StatementResult::Begin => write!(f, "Transaction started"),
+            StatementResult::Commit => write!(f, "Transaction committed"),
+            StatementResult::Rollback => write!(f, "Transaction rolled back"),
+            StatementResult::CreateTable(name) => write!(f, "Created table {}", name),
+            StatementResult::DropTable(name) => write!(f, "Dropped table {}", name),
+            StatementResult::ShowTables { .. } => write!(f, "Showed tables"),
+            StatementResult::Delete(count) => write!(f, "Deleted {} rows", count),
+            StatementResult::Insert(count) => write!(f, "Inserted {} rows", count),
+            StatementResult::Query { .. } => write!(f, "Query ran"),
+        }
+    }
 }
 
 pub struct Session<'a, E: Engine<'a>> {

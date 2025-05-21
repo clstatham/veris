@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use sqlparser::ast;
+
 use crate::{
     error::Error,
     types::{
@@ -8,24 +10,41 @@ use crate::{
     },
 };
 
+use super::aggregate::aggregate_function_args;
+
 #[derive(Debug, Default)]
 pub struct Scope {
     columns: Vec<ColumnLabel>,
     tables: HashSet<TableName>,
     qualified: HashMap<(TableName, ColumnName), ColumnIndex>,
     unqualified: HashMap<ColumnName, Vec<ColumnIndex>>,
+    aggregates: HashMap<ast::Function, ColumnIndex>,
 }
 
 impl Scope {
+    pub fn from_table(table: &Table, alias: Option<&TableName>) -> Result<Self, Error> {
+        let mut scope = Self::default();
+        scope.add_table(table, alias)?;
+        Ok(scope)
+    }
+
+    pub fn spawn(&self) -> Self {
+        Self {
+            tables: self.tables.clone(),
+            ..Default::default()
+        }
+    }
+
     pub fn merge_with(&mut self, scope: Self) -> Result<(), Error> {
         for table in scope.tables {
-            if self.tables.contains(&table) {
-                return Err(Error::DuplicateTable(table));
-            }
             self.tables.insert(table);
         }
+        let offset = self.columns.len();
         for label in scope.columns {
             self.add_column(label)?;
+        }
+        for (agg, index) in scope.aggregates {
+            self.aggregates.entry(agg).or_insert(index + offset);
         }
 
         Ok(())
@@ -48,9 +67,6 @@ impl Scope {
     }
 
     pub fn add_column(&mut self, label: ColumnLabel) -> Result<ColumnIndex, Error> {
-        if self.columns.contains(&label) {
-            return Err(Error::DuplicateColumn(label));
-        }
         let index = ColumnIndex::new(self.columns.len());
 
         if let ColumnLabel::Qualified(table, column) = &label {
@@ -67,6 +83,40 @@ impl Scope {
 
         self.columns.push(label);
         Ok(index)
+    }
+
+    pub fn add_aggregate(&mut self, expr: ast::Function) -> Result<ColumnIndex, Error> {
+        if self.aggregates.contains_key(&expr) {
+            return Err(Error::DuplicateAggregate(expr.to_string()));
+        }
+
+        let args = aggregate_function_args(&expr)?;
+        if args.len() != 1 {
+            return Err(Error::NotYetSupported(
+                "Aggregate function with multiple arguments".to_string(),
+            ));
+        }
+        let arg = args[0].clone();
+
+        let label = if let ast::Expr::Identifier(ident) = &arg {
+            ColumnLabel::Unqualified(ColumnName::new(ident.value.clone()))
+        } else if let ast::Expr::CompoundIdentifier(idents) = &arg {
+            assert_eq!(idents.len(), 2);
+            ColumnLabel::Qualified(
+                TableName::new(idents[0].value.clone()),
+                ColumnName::new(idents[1].value.clone()),
+            )
+        } else {
+            ColumnLabel::None
+        };
+
+        let index = self.add_column(label)?;
+        self.aggregates.insert(expr, index.clone());
+        Ok(index)
+    }
+
+    pub fn get_aggregate_index(&self, func: &ast::Function) -> Option<ColumnIndex> {
+        self.aggregates.get(func).cloned()
     }
 
     pub fn get_column_index(
@@ -88,20 +138,16 @@ impl Scope {
             if indices.len() == 1 {
                 return Some(indices[0].clone());
             } else {
+                // ambiguous column name
                 return None;
             }
         }
         None
     }
 
-    pub fn get_column_label(
-        &self,
-        table: Option<&TableName>,
-        name: &ColumnName,
-    ) -> Option<ColumnLabel> {
-        if let Some(index) = self.get_column_index(table, name) {
-            return Some(self.columns[*index.inner()].clone());
-        }
-        None
+    pub fn get_column_label(&self, index: &ColumnIndex) -> Result<&ColumnLabel, Error> {
+        self.columns
+            .get(**index)
+            .ok_or_else(|| Error::InvalidColumnIndex(index.clone()))
     }
 }

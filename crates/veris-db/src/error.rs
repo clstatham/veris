@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::types::{
     schema::{ColumnIndex, ColumnName, TableName},
-    value::{ColumnLabel, DataType, Row, Value},
+    value::{ColumnLabel, DataType, Value},
 };
 
 #[derive(Debug, Error, PartialEq, Clone)]
@@ -14,16 +14,20 @@ pub enum Error {
     NotInTransaction,
     #[error("Transaction already in progress")]
     AlreadyInTransaction,
+    #[error("Invalid plan")]
+    InvalidPlan,
     #[error("Table already exists: {0}")]
     TableAlreadyExists(TableName),
     #[error("Table does not exist: {0}")]
     TableDoesNotExist(TableName),
     #[error("Row not found")]
     RowNotFound,
-    #[error("Column {0} not found")]
-    ColumnNotFound(String),
-    #[error("Invalid column index: {0} for row: {1}")]
-    InvalidColumnIndex(ColumnIndex, Row),
+    #[error("Column {0} not found for row of length {1}")]
+    ColumnNotFound(String, usize),
+    #[error("Invalid column index: {0}")]
+    InvalidColumnIndex(ColumnIndex),
+    #[error("Invalid column label: {0}")]
+    InvalidColumnLabel(String),
     #[error("Invalid data type: {0}")]
     InvalidDataType(ast::DataType),
     #[error("Invalid value: {0}")]
@@ -72,6 +76,10 @@ pub enum Error {
     DuplicateTable(TableName),
     #[error("Duplicate column: {0}")]
     DuplicateColumn(ColumnLabel),
+    #[error("Duplicate aggregate: {0}")]
+    DuplicateAggregate(String),
+    #[error("Aggregate not found: {0}")]
+    AggregateNotFound(String),
     #[error("Row referenced by {0}.{1} = {2}")]
     ReferentialIntegrity(TableName, ColumnName, Value),
 }
