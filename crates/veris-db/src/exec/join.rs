@@ -2,7 +2,7 @@ use std::iter::Peekable;
 
 use crate::{
     error::Error,
-    types::value::{Row, Rows, Value},
+    types::value::{Row, RowIter, Value},
 };
 
 use super::expr::Expr;
@@ -17,10 +17,10 @@ pub enum JoinType {
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct NestedLoopJoiner {
-    left: Peekable<Rows>,
-    right: Peekable<Rows>,
-    left_orig: Peekable<Rows>,
-    right_orig: Peekable<Rows>,
+    left: Peekable<RowIter>,
+    right: Peekable<RowIter>,
+    left_orig: Peekable<RowIter>,
+    right_orig: Peekable<RowIter>,
     left_cols: usize,
     right_cols: usize,
     left_matched: bool,
@@ -31,8 +31,8 @@ pub struct NestedLoopJoiner {
 
 impl NestedLoopJoiner {
     pub fn new(
-        left: Rows,
-        right: Rows,
+        left: RowIter,
+        right: RowIter,
         left_cols: usize,
         right_cols: usize,
         on: Option<Expr>,

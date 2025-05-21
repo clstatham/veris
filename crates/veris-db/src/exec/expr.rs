@@ -4,16 +4,13 @@ use sqlparser::ast;
 
 use crate::{
     error::Error,
-    types::{
-        schema::ColumnIndex,
-        value::{Row, Value},
-    },
+    types::value::{Row, Value},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Expr {
     Constant(Value),
-    Column(ColumnIndex),
+    Column(usize),
     BinaryOp(Box<Expr>, BinaryOp, Box<Expr>),
 }
 
@@ -24,9 +21,9 @@ impl Expr {
             Expr::Column(index) => {
                 if let Some(row) = row {
                     Ok(row
-                        .get(**index)
+                        .get(*index)
                         .cloned()
-                        .ok_or(Error::InvalidColumnIndex(index.clone()))?)
+                        .ok_or(Error::InvalidColumnIndex(*index))?)
                 } else {
                     Err(Error::RowNotFound)
                 }

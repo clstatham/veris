@@ -6,7 +6,7 @@ use sqlparser::ast;
 
 use crate::{
     error::Error,
-    types::value::{Row, Rows, Value},
+    types::value::{Row, RowIter, Value},
 };
 
 use super::expr::Expr;
@@ -45,9 +45,9 @@ impl Aggregator {
         Ok(())
     }
 
-    pub fn finish(self) -> Result<Rows, Error> {
+    pub fn finish(self) -> Result<RowIter, Error> {
         let groups = self.groups.into_iter().collect::<Vec<_>>();
-        Ok(Box::new(groups.into_iter().map(|(keys, accums)| {
+        Ok(RowIter::new(groups.into_iter().map(|(keys, accums)| {
             keys.into_iter()
                 .map(Ok)
                 .chain(accums.into_iter().map(|accum| accum.value()))

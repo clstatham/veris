@@ -12,8 +12,8 @@ use crate::{
         mvcc::{Mvcc, MvccTransaction},
     },
     types::{
-        schema::{ColumnIndex, ColumnName, Table, TableName},
-        value::{Row, Rows, Value},
+        schema::Table,
+        value::{Row, RowIter, Rows, Value},
     },
 };
 
@@ -21,9 +21,9 @@ use super::{Catalog, Engine, Transaction};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Key<'a> {
-    Table(Cow<'a, TableName>),
-    Index(Cow<'a, TableName>, Cow<'a, ColumnName>, Cow<'a, Value>),
-    Row(Cow<'a, TableName>, Cow<'a, Value>),
+    Table(Cow<'a, str>),
+    Index(Cow<'a, str>, Cow<'a, str>, Cow<'a, Value>),
+    Row(Cow<'a, str>, Cow<'a, Value>),
 }
 
 impl<'a> KeyEncoding<'a> for Key<'a> {}
@@ -31,8 +31,8 @@ impl<'a> KeyEncoding<'a> for Key<'a> {}
 #[derive(Debug, Serialize, Deserialize)]
 pub enum KeyPrefix<'a> {
     Table,
-    Index(Cow<'a, TableName>, Cow<'a, ColumnName>),
-    Row(Cow<'a, TableName>),
+    Index(Cow<'a, str>, Cow<'a, str>),
+    Row(Cow<'a, str>),
 }
 
 impl<'a> KeyEncoding<'a> for KeyPrefix<'a> {}
@@ -45,10 +45,10 @@ impl<E: StorageEngine> Local<E> {
     }
 }
 
-impl<'a, E: StorageEngine + 'static> Engine<'a> for Local<E> {
+impl<E: StorageEngine + 'static> Engine for Local<E> {
     type Transaction = LocalTransaction<E>;
 
-    fn begin(&'a self) -> Result<Self::Transaction, Error> {
+    fn begin(&self) -> Result<Self::Transaction, Error> {
         Ok(LocalTransaction(self.0.begin()?))
     }
 }
@@ -56,7 +56,7 @@ impl<'a, E: StorageEngine + 'static> Engine<'a> for Local<E> {
 pub struct LocalTransaction<E: StorageEngine>(MvccTransaction<E>);
 
 impl<E: StorageEngine> LocalTransaction<E> {
-    fn get_row(&self, table: &TableName, id: &Value) -> Result<Option<Row>, Error> {
+    fn get_row(&self, table: &str, id: &Value) -> Result<Option<Row>, Error> {
         let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
         if let Some(value) = self.0.get(&key)? {
             let row = Row::decode(&value)?;
@@ -65,22 +65,22 @@ impl<E: StorageEngine> LocalTransaction<E> {
         Ok(None)
     }
 
-    fn has_index(&self, table: &TableName, column: &ColumnName) -> Result<bool, Error> {
+    fn has_index(&self, table: &str, column: &str) -> Result<bool, Error> {
         let table = self
             .get_table(table)?
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
         Ok(table
             .columns
             .iter()
-            .find(|c| &c.name == column)
+            .find(|c| c.name == column)
             .map(|c| c.has_secondary_index)
             .unwrap_or(false))
     }
 
     fn get_index(
         &self,
-        table: &TableName,
-        column: &ColumnName,
+        table: &str,
+        column: &str,
         value: &Value,
     ) -> Result<BTreeSet<Value>, Error> {
         debug_assert!(self.has_index(table, column)?);
@@ -101,8 +101,8 @@ impl<E: StorageEngine> LocalTransaction<E> {
 
     fn set_index(
         &self,
-        table: &TableName,
-        column: &ColumnName,
+        table: &str,
+        column: &str,
         value: &Value,
         ids: BTreeSet<Value>,
     ) -> Result<(), Error> {
@@ -122,10 +122,7 @@ impl<E: StorageEngine> LocalTransaction<E> {
         Ok(())
     }
 
-    fn table_refs(
-        &self,
-        referenced_table: &TableName,
-    ) -> Result<Vec<(Table, Vec<ColumnIndex>)>, Error> {
+    fn table_refs(&self, referenced_table: &String) -> Result<Vec<(Table, Vec<usize>)>, Error> {
         let tables = self.list_tables()?;
         let mut refs = Vec::new();
         for table in tables {
@@ -138,7 +135,7 @@ impl<E: StorageEngine> LocalTransaction<E> {
                         .as_ref()
                         .is_some_and(|key| &key.table == referenced_table)
                 })
-                .map(|(i, _)| ColumnIndex::new(i))
+                .map(|(i, _)| i)
                 .collect_vec();
             if !r.is_empty() {
                 refs.push((table, r));
@@ -159,7 +156,8 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
         Ok(())
     }
 
-    fn delete(&self, table: &TableName, ids: &[Value]) -> Result<(), Error> {
+    fn delete(&self, table: &str, ids: impl Into<Row>) -> Result<(), Error> {
+        let ids: Row = ids.into();
         let table = self
             .get_table(table)?
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
@@ -174,31 +172,25 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
         for (source, refs) in self.table_refs(&table.name)? {
             let self_reference = source.name == table.name;
             for i in refs {
-                let column = &source.columns[i.clone().into_inner()];
+                let column = &source.columns[i];
                 let mut source_ids: BTreeSet<Value> = if i == source.primary_key_index {
-                    self.get(&source.name, ids)?
+                    self.get(&source.name, ids.clone())?
                         .into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .nth(i.clone().into_inner())
-                                .ok_or(Error::InvalidRowState)
-                        })
+                        .map(|row| row.into_iter().nth(i).ok_or(Error::InvalidRowState))
                         .try_collect()?
                 } else {
-                    self.lookup_index(&source.name, &column.name, ids)?
+                    self.lookup_index(&source.name, &column.name, &ids)?
                 };
 
                 if self_reference {
-                    for id in ids {
+                    for id in ids.iter() {
                         source_ids.remove(id);
                     }
                 }
 
                 if let Some(source_id) = source_ids.first() {
                     let table = source.name.clone();
-                    let column = source.columns[source.primary_key_index.into_inner()]
-                        .name
-                        .clone();
+                    let column = source.columns[source.primary_key_index].name.clone();
                     return Err(Error::ReferentialIntegrity(
                         table,
                         column,
@@ -210,28 +202,30 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
 
         for id in ids {
             if !indices.is_empty() {
-                if let Some(row) = self.get_row(&table.name, id)? {
+                if let Some(row) = self.get_row(&table.name, &id)? {
                     for (i, column) in indices.iter().copied() {
                         let mut ids = self.get_index(&table.name, &column.name, &row[i])?;
-                        ids.remove(id);
+                        ids.remove(&id);
                         self.set_index(&table.name, &column.name, &row[i], ids)?;
                     }
                 }
             }
 
             self.0
-                .delete(&Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)).encode()?)?;
+                .delete(&Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(&id)).encode()?)?;
         }
         Ok(())
     }
 
-    fn get(&self, table: &TableName, ids: &[Value]) -> Result<Box<[Row]>, Error> {
+    fn get(&self, table: &str, ids: impl Into<Row>) -> Result<Box<[Row]>, Error> {
+        let ids: Row = ids.into();
         ids.iter()
             .filter_map(|id| self.get_row(table, id).transpose())
             .collect()
     }
 
-    fn insert(&self, table: &TableName, rows: Box<[Row]>) -> Result<(), Error> {
+    fn insert(&self, table: &str, rows: impl Into<Rows>) -> Result<(), Error> {
+        let rows: Rows = rows.into();
         let table = self
             .get_table(table)?
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
@@ -239,7 +233,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             if !table.validate_row(&row) {
                 return Err(Error::InvalidRow(table.name.clone()));
             }
-            let id = &row[*table.primary_key_index];
+            let id = &row[table.primary_key_index];
 
             let key = Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)).encode()?;
             let value = row.encode()?;
@@ -261,8 +255,8 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
 
     fn lookup_index(
         &self,
-        table: &TableName,
-        column: &ColumnName,
+        table: &str,
+        column: &str,
         values: &[Value],
     ) -> Result<BTreeSet<Value>, Error> {
         values
@@ -272,7 +266,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             .collect()
     }
 
-    fn scan(&self, table: &TableName, filter: Option<Expr>) -> Result<Rows, Error> {
+    fn scan(&self, table: &str, filter: Option<Expr>) -> Result<RowIter, Error> {
         let key = KeyPrefix::Row(Cow::Borrowed(table)).encode()?;
         let rows = self
             .0
@@ -280,7 +274,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             .map(|res| res.and_then(|(_, value)| Row::decode(&value)));
 
         let Some(filter) = filter else {
-            return Ok(Box::new(rows));
+            return Ok(RowIter::new(rows));
         };
         let rows = rows.filter_map(move |res| {
             res.and_then(|row| match filter.eval(Some(&row))? {
@@ -290,7 +284,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             })
             .transpose()
         });
-        Ok(Box::new(rows))
+        Ok(RowIter::new(rows))
     }
 }
 
@@ -305,7 +299,7 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
         Ok(())
     }
 
-    fn drop_table(&self, table: &TableName) -> Result<(), Error> {
+    fn drop_table(&self, table: &str) -> Result<(), Error> {
         let Some(table) = self.get_table(table)? else {
             return Err(Error::TableDoesNotExist(table.to_owned()));
         };
@@ -341,7 +335,7 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
         Ok(())
     }
 
-    fn get_table(&self, table: &TableName) -> Result<Option<Table>, Error> {
+    fn get_table(&self, table: &str) -> Result<Option<Table>, Error> {
         let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
         if let Some(table_value) = self.0.get(&table_key)? {
             let table = Table::decode(&table_value)?;
@@ -356,50 +350,5 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
             .scan_prefix(&prefix)?
             .map(|r| r.and_then(|(_, v)| Table::decode(&v)))
             .try_collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{storage::memory::Memory, types::schema::ColumnIndex};
-
-    #[test]
-    fn test_local_engine() {
-        let engine = Local::new(Memory::default());
-        let txn = engine.begin().unwrap();
-        let table = Table {
-            name: TableName::new("test".to_string()),
-            primary_key_index: ColumnIndex::new(0),
-            columns: vec![],
-        };
-        txn.create_table(table).unwrap();
-        txn.commit().unwrap();
-
-        let txn = engine.begin().unwrap();
-        let tables = txn.list_tables().unwrap();
-        assert_eq!(tables.len(), 1);
-        assert_eq!(tables[0].name, TableName::new("test".to_string()));
-        txn.commit().unwrap();
-
-        let txn = engine.begin().unwrap();
-        let table = txn.get_table(&TableName::new("test".to_string())).unwrap();
-        assert!(table.is_some());
-        let table = table.unwrap();
-        assert_eq!(table.name, TableName::new("test".to_string()));
-        assert_eq!(table.primary_key_index, ColumnIndex::new(0));
-        assert_eq!(table.columns.len(), 0);
-        txn.drop_table(&TableName::new("test".to_string())).unwrap();
-        txn.commit().unwrap();
-
-        let txn = engine.begin().unwrap();
-        let table = txn.get_table(&TableName::new("test".to_string())).unwrap();
-        assert!(table.is_none());
-        txn.commit().unwrap();
-
-        let txn = engine.begin().unwrap();
-        let tables = txn.list_tables().unwrap();
-        assert_eq!(tables.len(), 0);
-        txn.commit().unwrap();
     }
 }

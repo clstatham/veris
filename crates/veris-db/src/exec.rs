@@ -10,8 +10,8 @@ use crate::{
     engine::Transaction,
     error::Error,
     types::{
-        schema::{ColumnIndex, Table},
-        value::{Row, Rows, Value},
+        schema::Table,
+        value::{Row, RowIter},
     },
 };
 
@@ -51,7 +51,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
             Plan::Query(node) => {
                 let mut columns = Vec::new();
                 for i in 0..node.num_columns() {
-                    let label = node.column_label(&ColumnIndex::new(i));
+                    let label = node.column_label(i);
                     columns.push(label.clone());
                 }
 
@@ -66,7 +66,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
         }
     }
 
-    fn insert(&mut self, table: Table, mut source: Rows) -> Result<usize, Error> {
+    fn insert(&mut self, table: Table, mut source: RowIter) -> Result<usize, Error> {
         let mut rows = Vec::new();
         while let Some(values) = source.next().transpose()? {
             if !table.validate_row(&values) {
@@ -80,11 +80,11 @@ impl<'a, T: Transaction> Executor<'a, T> {
         }
 
         let count = rows.len();
-        self.txn.insert(&table.name, rows.into_boxed_slice())?;
+        self.txn.insert(&table.name, rows)?;
         Ok(count)
     }
 
-    fn execute_inner(&mut self, plan: Plan) -> Result<Rows, Error> {
+    fn execute_inner(&mut self, plan: Plan) -> Result<RowIter, Error> {
         match plan {
             Plan::Query(node) => self.execute_inner(*node),
             Plan::Values { rows } => self.execute_values(rows),
@@ -104,13 +104,12 @@ impl<'a, T: Transaction> Executor<'a, T> {
             Plan::Project {
                 source, columns, ..
             } => self.execute_project(*source, columns),
-            Plan::Remap { source, targets } => self.execute_remap(*source, targets),
-            Plan::Nothing { .. } => Ok(Box::new(std::iter::empty())),
+            Plan::Nothing { .. } => Ok(RowIter::new(std::iter::empty())),
             _ => Err(Error::InvalidPlan),
         }
     }
 
-    fn execute_values(&mut self, rows: Vec<Vec<Expr>>) -> Result<Rows, Error> {
+    fn execute_values(&mut self, rows: Vec<Vec<Expr>>) -> Result<RowIter, Error> {
         let mut result = Vec::new();
         for row in rows {
             let mut values = Vec::new();
@@ -119,10 +118,10 @@ impl<'a, T: Transaction> Executor<'a, T> {
             }
             result.push(Row::from(values));
         }
-        Ok(Box::new(result.into_iter().map(Ok)))
+        Ok(RowIter::new(result.into_iter().map(Ok)))
     }
 
-    fn execute_scan(&mut self, table: Table, filter: Option<Expr>) -> Result<Rows, Error> {
+    fn execute_scan(&mut self, table: Table, filter: Option<Expr>) -> Result<RowIter, Error> {
         let rows = self.txn.scan(&table.name, filter)?;
         Ok(rows)
     }
@@ -133,7 +132,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
         right: Plan,
         join_type: JoinType,
         on: Option<Expr>,
-    ) -> Result<Rows, Error> {
+    ) -> Result<RowIter, Error> {
         let left_cols = left.num_columns();
         let right_cols = right.num_columns();
         let left = self.execute_inner(left)?;
@@ -141,7 +140,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
 
         let joiner = NestedLoopJoiner::new(left, right, left_cols, right_cols, on, join_type);
 
-        Ok(Box::new(joiner))
+        Ok(RowIter::new(joiner))
     }
 
     fn execute_aggregate(
@@ -149,7 +148,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
         source: Plan,
         group_by: Vec<Expr>,
         aggregates: Vec<Aggregate>,
-    ) -> Result<Rows, Error> {
+    ) -> Result<RowIter, Error> {
         let source = self.execute_inner(source)?;
         let mut aggregator = Aggregator::new(group_by, aggregates);
         for row in source {
@@ -160,7 +159,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
         Ok(result)
     }
 
-    fn execute_filter(&mut self, source: Plan, predicate: Expr) -> Result<Rows, Error> {
+    fn execute_filter(&mut self, source: Plan, predicate: Expr) -> Result<RowIter, Error> {
         let source = self.execute_inner(source)?;
         let mut result = Vec::new();
         for row in source {
@@ -173,10 +172,10 @@ impl<'a, T: Transaction> Executor<'a, T> {
                 result.push(row);
             }
         }
-        Ok(Box::new(result.into_iter().map(Ok)))
+        Ok(RowIter::new(result.into_iter().map(Ok)))
     }
 
-    fn execute_project(&mut self, source: Plan, columns: Vec<Expr>) -> Result<Rows, Error> {
+    fn execute_project(&mut self, source: Plan, columns: Vec<Expr>) -> Result<RowIter, Error> {
         let source = self.execute_inner(source)?;
         let mut result = Vec::new();
         for row in source {
@@ -187,30 +186,6 @@ impl<'a, T: Transaction> Executor<'a, T> {
             }
             result.push(Row::from(projected_row));
         }
-        Ok(Box::new(result.into_iter().map(Ok)))
-    }
-
-    fn execute_remap(
-        &mut self,
-        source: Plan,
-        targets: Vec<Option<ColumnIndex>>,
-    ) -> Result<Rows, Error> {
-        let source = self.execute_inner(source)?;
-        let size = targets
-            .iter()
-            .flatten()
-            .cloned()
-            .map(|i| i.into_inner() + 1)
-            .max()
-            .unwrap_or(0);
-        Ok(Box::new(source.map_ok(move |row| {
-            let mut new_row = vec![Value::Null; size];
-            for (i, target) in targets.iter().enumerate() {
-                if let Some(target) = target {
-                    new_row[**target] = row[i].clone();
-                }
-            }
-            Row::from(new_row)
-        })))
+        Ok(RowIter::new(result.into_iter().map(Ok)))
     }
 }

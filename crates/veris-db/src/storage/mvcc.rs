@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{BTreeSet, VecDeque},
-    ops::{Add, Bound, RangeBounds},
+    ops::{Bound, RangeBounds},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -14,29 +14,13 @@ use crate::{
     },
     error::Error,
     storage::engine::StorageEngine,
-    wrap,
 };
 
 use super::engine::ScanIterator;
 
-wrap! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-    pub struct Version(u64);
-}
-
-impl Version {
-    pub const MAX: Self = Self(u64::MAX);
-}
+pub type Version = u64;
 
 impl ValueEncoding for Version {}
-
-impl Add<u64> for Version {
-    type Output = Self;
-
-    fn add(self, rhs: u64) -> Self::Output {
-        Version(self.0 + rhs)
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Key<'a> {
@@ -91,7 +75,7 @@ impl<E: StorageEngine> Mvcc<E> {
         let mut engine = self.0.lock()?;
         let version = match engine.get(&Key::NextVersion.encode()?)? {
             Some(v) => Version::decode(&v)?,
-            None => Version::new(1),
+            None => 1,
         };
         engine.set(&Key::NextVersion.encode()?, (version + 1).encode()?)?;
 
@@ -270,7 +254,7 @@ impl<E: StorageEngine> MvccTransaction<E> {
     pub fn get(&self, key: &[u8]) -> Result<Option<Box<[u8]>>, Error> {
         let mut engine = self.engine.lock()?;
 
-        let from = Key::Version(Cow::Borrowed(key), Version::new(0)).encode()?;
+        let from = Key::Version(Cow::Borrowed(key), 0).encode()?;
         let to = Key::Version(Cow::Borrowed(key), self.state.version).encode()?;
         let mut scan = engine.scan(from..=to).rev();
         while let Some((key, value)) = scan.next().transpose()? {
@@ -296,18 +280,12 @@ impl<E: StorageEngine> MvccTransaction<E> {
             Bound::Excluded(k) => {
                 Bound::Excluded(Key::Version(Cow::Borrowed(k), Version::MAX).encode()?)
             }
-            Bound::Included(k) => {
-                Bound::Included(Key::Version(Cow::Borrowed(k), Version::new(0)).encode()?)
-            }
-            Bound::Unbounded => {
-                Bound::Included(Key::Version(Cow::Borrowed(&[]), Version::new(0)).encode()?)
-            }
+            Bound::Included(k) => Bound::Included(Key::Version(Cow::Borrowed(k), 0).encode()?),
+            Bound::Unbounded => Bound::Included(Key::Version(Cow::Borrowed(&[]), 0).encode()?),
         };
 
         let end = match range.end_bound() {
-            Bound::Excluded(k) => {
-                Bound::Excluded(Key::Version(Cow::Borrowed(k), Version::new(0)).encode()?)
-            }
+            Bound::Excluded(k) => Bound::Excluded(Key::Version(Cow::Borrowed(k), 0).encode()?),
             Bound::Included(k) => {
                 Bound::Included(Key::Version(Cow::Borrowed(k), Version::MAX).encode()?)
             }
@@ -463,13 +441,13 @@ mod tests {
     fn test_mvcc() -> Result<(), Error> {
         let engine = Mvcc::new(Memory::new());
         let txn = engine.begin()?;
-        assert_eq!(txn.state.version.into_inner(), 1);
+        assert_eq!(txn.state.version, 1);
         txn.set(b"key", (*b"value").into())?;
         assert_eq!(txn.get(b"key")?, Some((*b"value").into()));
         txn.commit()?;
 
         let txn = engine.begin()?;
-        assert_eq!(txn.state.version.into_inner(), 2);
+        assert_eq!(txn.state.version, 2);
         assert_eq!(txn.get(b"key")?, Some((*b"value").into()));
         txn.rollback()?;
 

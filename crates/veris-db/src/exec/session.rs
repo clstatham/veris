@@ -7,7 +7,7 @@ use crate::{
     engine::{Catalog, Engine, Transaction},
     error::Error,
     types::{
-        schema::{Table, TableName},
+        schema::Table,
         value::{ColumnLabel, Row},
     },
 };
@@ -21,8 +21,8 @@ pub enum StatementResult {
     Begin,
     Commit,
     Rollback,
-    CreateTable(TableName),
-    DropTable(TableName),
+    CreateTable(String),
+    DropTable(String),
     ShowTables {
         tables: Vec<Table>,
     },
@@ -52,12 +52,12 @@ impl fmt::Display for StatementResult {
     }
 }
 
-pub struct Session<'a, E: Engine<'a>> {
+pub struct Session<'a, E: Engine> {
     engine: &'a E,
     current_transaction: Option<E::Transaction>,
 }
 
-impl<'a, E: Engine<'a>> Session<'a, E> {
+impl<'a, E: Engine> Session<'a, E> {
     pub fn new(engine: &'a E) -> Self {
         Self {
             engine,

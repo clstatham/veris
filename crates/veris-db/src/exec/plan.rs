@@ -3,17 +3,14 @@ use std::fmt::{self};
 use crate::{
     engine::Transaction,
     error::Error,
-    types::{
-        schema::{ColumnIndex, Table, TableName},
-        value::ColumnLabel,
-    },
+    types::{schema::Table, value::ColumnLabel},
 };
 
 use super::{Executor, aggregate::Aggregate, expr::Expr, join::JoinType, session::StatementResult};
 
 pub enum Plan {
     CreateTable(Table),
-    DropTable(TableName),
+    DropTable(String),
     Insert {
         table: Table,
         source: Box<Plan>,
@@ -46,14 +43,10 @@ pub enum Plan {
         columns: Vec<Expr>,
         aliases: Vec<ColumnLabel>,
     },
-    Remap {
-        source: Box<Plan>,
-        targets: Vec<Option<ColumnIndex>>,
-    },
     Scan {
         table: Table,
         filter: Option<Expr>,
-        alias: Option<TableName>,
+        alias: Option<String>,
     },
     Values {
         rows: Vec<Vec<Expr>>,
@@ -82,19 +75,12 @@ impl Plan {
             Plan::Join { left, right, .. } => left.num_columns() + right.num_columns(),
             Plan::Nothing { columns } => columns.len(),
             Plan::Project { columns, .. } => columns.len(),
-            Plan::Remap { targets, .. } => targets
-                .iter()
-                .flatten()
-                .cloned()
-                .map(|t| t.into_inner() + 1)
-                .max()
-                .unwrap_or(0),
             Plan::Scan { table, .. } => table.columns.len(),
             Plan::Values { rows } => rows.first().map_or(0, |r| r.len()),
         }
     }
 
-    pub fn column_label(&self, index: &ColumnIndex) -> ColumnLabel {
+    pub fn column_label(&self, index: usize) -> ColumnLabel {
         match self {
             Plan::CreateTable { .. } => ColumnLabel::None,
             Plan::DropTable { .. } => ColumnLabel::None,
@@ -103,8 +89,8 @@ impl Plan {
             Plan::Query(source) => source.column_label(index),
             Plan::Aggregate {
                 source, group_by, ..
-            } => match group_by.get(**index) {
-                Some(Expr::Column(i)) => source.column_label(i),
+            } => match group_by.get(index) {
+                Some(Expr::Column(i)) => source.column_label(*i),
                 Some(_) | None => ColumnLabel::None,
             },
             Plan::Filter { source, .. } => source.column_label(index),
@@ -115,51 +101,42 @@ impl Plan {
                 ..
             } => match join_type {
                 JoinType::Inner => {
-                    if index.inner() < &left.num_columns() {
+                    if index < left.num_columns() {
                         left.column_label(index)
                     } else {
-                        right.column_label(&ColumnIndex::new(index.inner() - left.num_columns()))
+                        right.column_label(index - left.num_columns())
                     }
                 }
                 JoinType::Left => {
-                    if index.inner() < &left.num_columns() {
+                    if index < left.num_columns() {
                         left.column_label(index)
                     } else {
-                        right.column_label(&ColumnIndex::new(index.inner() - left.num_columns()))
+                        right.column_label(index - left.num_columns())
                     }
                 }
                 JoinType::Right => {
-                    if index.inner() < &right.num_columns() {
+                    if index < right.num_columns() {
                         right.column_label(index)
                     } else {
-                        left.column_label(&ColumnIndex::new(index.inner() - right.num_columns()))
+                        left.column_label(index - right.num_columns())
                     }
                 }
             },
-            Plan::Nothing { columns } => columns
-                .get(*index.inner())
-                .cloned()
-                .unwrap_or(ColumnLabel::None),
+            Plan::Nothing { columns } => columns.get(index).cloned().unwrap_or(ColumnLabel::None),
             Plan::Project {
                 source,
                 columns,
                 aliases,
-            } => match aliases.get(*index.inner()) {
-                Some(ColumnLabel::None) | None => match columns.get(*index.inner()) {
-                    Some(Expr::Column(i)) => source.column_label(i),
+            } => match aliases.get(index) {
+                Some(ColumnLabel::None) | None => match columns.get(index) {
+                    Some(Expr::Column(i)) => source.column_label(*i),
                     Some(_) | None => ColumnLabel::None,
                 },
                 Some(label) => label.clone(),
             },
-            Plan::Remap { source, targets } => targets
-                .iter()
-                .cloned()
-                .position(|t| t.as_ref() == Some(index))
-                .map(|i| source.column_label(&ColumnIndex::new(i)))
-                .unwrap_or(ColumnLabel::None),
             Plan::Scan { table, alias, .. } => ColumnLabel::Qualified(
                 alias.clone().unwrap_or_else(|| table.name.clone()),
-                table.columns[**index].name.clone(),
+                table.columns[index].name.clone(),
             ),
             Plan::Values { .. } => ColumnLabel::None,
         }
@@ -250,17 +227,6 @@ impl Plan {
                 writeln!(f, "Project")?;
                 for (i, column) in columns.iter().enumerate() {
                     writeln!(f, "{}├── {}: {}", prefix, aliases[i], column)?;
-                }
-                source.format(f, &prefix, false, true)?;
-            }
-            Plan::Remap { source, targets } => {
-                writeln!(f, "Remap")?;
-                for target in targets {
-                    if let Some(target) = target {
-                        writeln!(f, "{}├── {:?}", prefix, target)?;
-                    } else {
-                        writeln!(f, "{}└── None", prefix)?;
-                    }
                 }
                 source.format(f, &prefix, false, true)?;
             }

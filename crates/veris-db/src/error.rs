@@ -3,10 +3,7 @@ use std::{num::TryFromIntError, path::PathBuf, string::FromUtf8Error, sync::Pois
 use sqlparser::ast;
 use thiserror::Error;
 
-use crate::types::{
-    schema::{ColumnIndex, ColumnName, TableName},
-    value::{ColumnLabel, DataType, Value},
-};
+use crate::types::value::{ColumnLabel, DataType, Value};
 
 #[derive(Debug, Error, PartialEq, Clone)]
 pub enum Error {
@@ -17,15 +14,15 @@ pub enum Error {
     #[error("Invalid plan")]
     InvalidPlan,
     #[error("Table already exists: {0}")]
-    TableAlreadyExists(TableName),
+    TableAlreadyExists(String),
     #[error("Table does not exist: {0}")]
-    TableDoesNotExist(TableName),
+    TableDoesNotExist(String),
     #[error("Row not found")]
     RowNotFound,
     #[error("Column {0} not found for row of length {1}")]
     ColumnNotFound(String, usize),
     #[error("Invalid column index: {0}")]
-    InvalidColumnIndex(ColumnIndex),
+    InvalidColumnIndex(usize),
     #[error("Invalid column label: {0}")]
     InvalidColumnLabel(String),
     #[error("Invalid data type: {0}")]
@@ -37,11 +34,11 @@ pub enum Error {
     #[error("Row is in invalid state")]
     InvalidRowState,
     #[error("Invalid row for table: {0}")]
-    InvalidRow(TableName),
+    InvalidRow(String),
     #[error("Invalid filter: {0}")]
     InvalidFilterResult(Value),
     #[error("Row has too many values for table {0}")]
-    TooManyValues(TableName),
+    TooManyValues(String),
     #[error("Error converting from AST: {0}")]
     FromAstError(String),
     #[error("Not yet supported: {0}")]
@@ -73,7 +70,7 @@ pub enum Error {
     #[error("Invalid cast: {0} to {1}")]
     InvalidCast(Value, DataType),
     #[error("Duplicate table: {0}")]
-    DuplicateTable(TableName),
+    DuplicateTable(String),
     #[error("Duplicate column: {0}")]
     DuplicateColumn(ColumnLabel),
     #[error("Duplicate aggregate: {0}")]
@@ -81,7 +78,7 @@ pub enum Error {
     #[error("Aggregate not found: {0}")]
     AggregateNotFound(String),
     #[error("Row referenced by {0}.{1} = {2}")]
-    ReferentialIntegrity(TableName, ColumnName, Value),
+    ReferentialIntegrity(String, String, Value),
 }
 
 impl<T> From<PoisonError<T>> for Error {

@@ -1,18 +1,17 @@
-use std::hash::Hash;
+use std::{fmt, hash::Hash};
 
 use chrono::NaiveDate;
-use derive_more::{Deref, DerefMut, Display, From};
+use derive_more::{Deref, DerefMut, Into, IntoIterator};
 use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
 use crate::{encoding::ValueEncoding, error::Error};
 
-use super::schema::{ColumnName, TableName};
-
-#[derive(Clone, Copy, Debug, PartialEq, Hash, Serialize, Deserialize, Eq)]
+#[derive(Clone, Default, Copy, Debug, PartialEq, Hash, Serialize, Deserialize, Eq)]
 pub enum DataType {
     Boolean,
+    #[default]
     Integer,
     Float,
     Decimal {
@@ -60,8 +59,8 @@ impl TryFrom<&ast::DataType> for DataType {
     }
 }
 
-impl std::fmt::Display for DataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DataType::Boolean => write!(f, "BOOLEAN"),
             DataType::Integer => write!(f, "INTEGER"),
@@ -316,8 +315,8 @@ impl Value {
     }
 }
 
-impl std::fmt::Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::Null => write!(f, "NULL"),
             Value::Boolean(v) => write!(f, "{}", v),
@@ -399,25 +398,56 @@ impl PartialOrd for Value {
     }
 }
 
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::Integer(value)
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::Float(value)
+    }
+}
+
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Value::Boolean(value)
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::String(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::String(value.to_string())
+    }
+}
+
+impl From<NaiveDate> for Value {
+    fn from(value: NaiveDate) -> Self {
+        Value::Date(value)
+    }
+}
+
 #[derive(
-    Clone,
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Deref,
-    DerefMut,
-    Display,
-    From,
+    Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Deref, DerefMut,
 )]
-#[display("{:?}", self.iter().as_slice())]
 pub struct Row(Vec<Value>);
 
 impl ValueEncoding for Row {}
+
+impl fmt::Display for Row {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.iter().map(|v| v.to_string()))
+            .finish()
+    }
+}
 
 impl FromIterator<Value> for Row {
     fn from_iter<T: IntoIterator<Item = Value>>(iter: T) -> Self {
@@ -435,28 +465,152 @@ impl IntoIterator for Row {
     }
 }
 
-pub trait RowIter: Iterator<Item = Result<Row, Error>> + DynClone {}
-dyn_clone::clone_trait_object!(RowIter);
-impl<T: Iterator<Item = Result<Row, Error>> + DynClone> RowIter for T {}
+pub trait IntoRow {
+    fn into_row(self) -> Row;
+}
 
-pub type Rows = Box<dyn RowIter>;
+impl<T> From<T> for Row
+where
+    T: IntoRow,
+{
+    fn from(value: T) -> Self {
+        value.into_row()
+    }
+}
+
+impl IntoRow for Vec<Value> {
+    fn into_row(self) -> Row {
+        Row(self)
+    }
+}
+
+impl IntoRow for Box<[Value]> {
+    fn into_row(self) -> Row {
+        Row(self.into_vec())
+    }
+}
+
+macro_rules! impl_into_row {
+    ($($name:ident),+) => {
+        #[allow(non_snake_case)]
+        impl<$($name),+> IntoRow for ($($name,)+)
+        where
+            $($name: Into<Value>,)+
+        {
+            fn into_row(self) -> Row {
+                let ($($name,)+) = self;
+                Row(vec![$($name.into()),+])
+            }
+        }
+    };
+}
+
+impl_into_row!(A);
+impl_into_row!(A, B);
+impl_into_row!(A, B, C);
+impl_into_row!(A, B, C, D);
+impl_into_row!(A, B, C, D, E);
+impl_into_row!(A, B, C, D, E, F);
+impl_into_row!(A, B, C, D, E, F, G);
+impl_into_row!(A, B, C, D, E, F, G, H);
+
+pub trait RowIterImpl: Iterator<Item = Result<Row, Error>> + DynClone {}
+dyn_clone::clone_trait_object!(RowIterImpl);
+impl<T: Iterator<Item = Result<Row, Error>> + DynClone> RowIterImpl for T {}
+
+#[derive(Clone, Deref, DerefMut, Into)]
+pub struct RowIter(Box<dyn RowIterImpl>);
+
+impl RowIter {
+    pub fn new(rows: impl RowIterImpl + 'static) -> Self {
+        RowIter(Box::new(rows))
+    }
+
+    pub fn new_boxed(rows: Box<dyn RowIterImpl>) -> Self {
+        RowIter(rows)
+    }
+}
+
+impl Iterator for RowIter {
+    type Item = Result<Row, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Deref, DerefMut, IntoIterator)]
+pub struct Rows(Vec<Row>);
+
+impl Rows {
+    pub fn new(rows: impl Into<Vec<Row>>) -> Self {
+        Rows(rows.into())
+    }
+
+    pub fn into_row_vec(self) -> Vec<Row> {
+        self.0
+    }
+}
+
+pub trait IntoRows {
+    fn into_rows(self) -> Rows;
+}
+
+impl<T> From<T> for Rows
+where
+    T: IntoRows,
+{
+    fn from(value: T) -> Self {
+        value.into_rows()
+    }
+}
+
+impl IntoRows for Vec<Row> {
+    fn into_rows(self) -> Rows {
+        Rows(self)
+    }
+}
+
+macro_rules! impl_into_rows {
+    ($($name:ident),+) => {
+        #[allow(non_snake_case)]
+        impl<$($name),+> IntoRows for ($($name,)+)
+        where
+            $($name: IntoRow + 'static,)+
+        {
+            fn into_rows(self) -> Rows {
+                let ($($name,)+) = self;
+                Rows::new(vec![$($name.into_row()),+])
+            }
+        }
+    };
+}
+
+impl_into_rows!(A);
+impl_into_rows!(A, B);
+impl_into_rows!(A, B, C);
+impl_into_rows!(A, B, C, D);
+impl_into_rows!(A, B, C, D, E);
+impl_into_rows!(A, B, C, D, E, F);
+impl_into_rows!(A, B, C, D, E, F, G);
+impl_into_rows!(A, B, C, D, E, F, G, H);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnLabel {
     None,
-    Unqualified(ColumnName),
-    Qualified(TableName, ColumnName),
+    Unqualified(String),
+    Qualified(String, String),
 }
 
 impl ColumnLabel {
-    pub fn table_name(&self) -> Option<&TableName> {
+    pub fn table_name(&self) -> Option<&String> {
         match self {
             ColumnLabel::None => None,
             ColumnLabel::Unqualified(_) => None,
             ColumnLabel::Qualified(table, _) => Some(table),
         }
     }
-    pub fn column_name(&self) -> Option<&ColumnName> {
+    pub fn column_name(&self) -> Option<&String> {
         match self {
             ColumnLabel::None => None,
             ColumnLabel::Unqualified(name) => Some(name),
@@ -470,13 +624,11 @@ impl TryFrom<&ast::ObjectName> for ColumnLabel {
 
     fn try_from(value: &ast::ObjectName) -> Result<Self, Self::Error> {
         if value.0.len() == 1 {
-            Ok(ColumnLabel::Unqualified(ColumnName::new(
-                value.0[0].to_string(),
-            )))
+            Ok(ColumnLabel::Unqualified(value.0[0].to_string()))
         } else if value.0.len() == 2 {
             Ok(ColumnLabel::Qualified(
-                TableName::new(value.0[0].to_string()),
-                ColumnName::new(value.0[1].to_string()),
+                value.0[0].to_string(),
+                value.0[1].to_string(),
             ))
         } else {
             Err(Error::InvalidColumnLabel(value.to_string()))
@@ -484,8 +636,8 @@ impl TryFrom<&ast::ObjectName> for ColumnLabel {
     }
 }
 
-impl std::fmt::Display for ColumnLabel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ColumnLabel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ColumnLabel::None => write!(f, ""),
             ColumnLabel::Unqualified(name) => write!(f, "{}", name),

@@ -1,30 +1,20 @@
 use std::collections::BTreeSet;
 
-use derive_more::Display;
-use serde::{Deserialize, Serialize};
-
 use crate::{
     error::Error,
     exec::expr::Expr,
     types::{
-        schema::{ColumnName, Table, TableName},
-        value::{Row, Rows, Value},
+        schema::Table,
+        value::{Row, RowIter, Rows, Value},
     },
-    wrap,
 };
 
-pub mod debug;
 pub mod local;
-
-wrap! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Display)]
-    pub struct TransactionId(u64);
-}
 
 pub trait Catalog {
     fn create_table(&self, table: Table) -> Result<(), Error>;
-    fn drop_table(&self, table: &TableName) -> Result<(), Error>;
-    fn get_table(&self, table: &TableName) -> Result<Option<Table>, Error>;
+    fn drop_table(&self, table: &str) -> Result<(), Error>;
+    fn get_table(&self, table: &str) -> Result<Option<Table>, Error>;
     fn list_tables(&self) -> Result<Vec<Table>, Error>;
 }
 
@@ -32,20 +22,20 @@ pub trait Transaction: Catalog {
     fn commit(self) -> Result<(), Error>;
     fn rollback(self) -> Result<(), Error>;
 
-    fn delete(&self, table: &TableName, ids: &[Value]) -> Result<(), Error>;
-    fn get(&self, table: &TableName, ids: &[Value]) -> Result<Box<[Row]>, Error>;
-    fn insert(&self, table: &TableName, rows: Box<[Row]>) -> Result<(), Error>;
-    fn scan(&self, table: &TableName, filter: Option<Expr>) -> Result<Rows, Error>;
+    fn delete(&self, table: &str, ids: impl Into<Row>) -> Result<(), Error>;
+    fn get(&self, table: &str, ids: impl Into<Row>) -> Result<Box<[Row]>, Error>;
+    fn insert(&self, table: &str, rows: impl Into<Rows>) -> Result<(), Error>;
+    fn scan(&self, table: &str, filter: Option<Expr>) -> Result<RowIter, Error>;
     fn lookup_index(
         &self,
-        table: &TableName,
-        column: &ColumnName,
+        table: &str,
+        column: &str,
         values: &[Value],
     ) -> Result<BTreeSet<Value>, Error>;
 }
 
-pub trait Engine<'a> {
-    type Transaction: Transaction + 'a;
+pub trait Engine {
+    type Transaction: Transaction;
 
-    fn begin(&'a self) -> Result<Self::Transaction, Error>;
+    fn begin(&self) -> Result<Self::Transaction, Error>;
 }

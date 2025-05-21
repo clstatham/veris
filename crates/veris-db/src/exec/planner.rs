@@ -4,7 +4,7 @@ use crate::{
     engine::Catalog,
     error::Error,
     types::{
-        schema::{Column, ColumnIndex, ColumnName, ForeignKey, Table, TableName},
+        schema::{Column, ForeignKey, Table},
         value::{ColumnLabel, DataType, Value},
     },
 };
@@ -48,14 +48,13 @@ impl<'a, C: Catalog> Planner<'a, C> {
     }
 
     fn plan_create_table(&self, table: &ast::CreateTable) -> Result<Plan, Error> {
-        let mut primary_key_index = ColumnIndex::new(0);
+        let mut primary_key_index = 0;
         if let Some(primary_key) = table.primary_key.as_ref() {
             if let ast::Expr::Value(v) = &**primary_key {
                 if let ast::Value::Number(a, _) = &v.value {
-                    primary_key_index = ColumnIndex::new(
-                        a.parse()
-                            .map_err(|_| Error::InvalidPrimaryKey(primary_key.clone()))?,
-                    );
+                    primary_key_index = a
+                        .parse()
+                        .map_err(|_| Error::InvalidPrimaryKey(primary_key.clone()))?;
                 } else {
                     return Err(Error::InvalidPrimaryKey(primary_key.clone()));
                 }
@@ -80,11 +79,8 @@ impl<'a, C: Catalog> Planner<'a, C> {
                         characteristics,
                     } => {
                         let foreign_key = ForeignKey {
-                            table: TableName::new(foreign_table.to_string()),
-                            columns: referred_columns
-                                .iter()
-                                .map(|col| ColumnName::new(col.to_string()))
-                                .collect(),
+                            table: foreign_table.to_string(),
+                            columns: referred_columns.iter().map(|col| col.to_string()).collect(),
                         };
                         references = Some(foreign_key);
                         has_secondary_index = true;
@@ -104,7 +100,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
             }
 
             let col = Column {
-                name: ColumnName::new(column.name.to_string()),
+                name: column.name.to_string(),
                 data_type: DataType::try_from(&column.data_type)?,
                 nullable,
                 references,
@@ -114,7 +110,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
         }
 
         let table = Table {
-            name: TableName::new(table.name.to_string()),
+            name: table.name.to_string(),
             columns,
             primary_key_index,
         };
@@ -123,8 +119,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
     }
 
     fn plan_drop_table(&self, table: &str) -> Result<Plan, Error> {
-        let table = TableName::new(table.to_string());
-        Ok(Plan::DropTable(table))
+        Ok(Plan::DropTable(table.to_string()))
     }
 
     fn plan_insert(&self, stmt: &ast::Insert) -> Result<Plan, Error> {
@@ -132,7 +127,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
             let ast::TableObject::TableName(ref name) = stmt.table else {
                 return Err(Error::NotYetSupported(stmt.to_string()));
             };
-            TableName::new(name.to_string())
+            name.to_string()
         };
         let table = self
             .catalog
@@ -152,8 +147,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
     fn plan_delete(&self, stmt: &ast::Delete) -> Result<Plan, Error> {
         let mut tables = Vec::new();
         for table in &stmt.tables {
-            let table = TableName::new(table.to_string());
-            tables.push(table);
+            tables.push(table.to_string());
         }
         if tables.len() != 1 {
             return Err(Error::NotYetSupported(stmt.to_string()));
@@ -247,7 +241,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
 
             for expr in &group_by {
                 if let Expr::Column(index) = expr {
-                    let label = scope.get_column_label(index)?;
+                    let label = scope.get_column_label(*index)?;
                     child_scope.add_column(label.clone())?;
                 } else {
                     return Err(Error::NotYetSupported(expr.to_string()));
@@ -278,8 +272,8 @@ impl<'a, C: Catalog> Planner<'a, C> {
             } else {
                 // Wildcard
                 for i in 0..plan.num_columns() {
-                    let label = plan.column_label(&ColumnIndex::new(i));
-                    columns.push(Expr::Column(ColumnIndex::new(i)));
+                    let label = plan.column_label(i);
+                    columns.push(Expr::Column(i));
                     aliases.push(label);
                 }
             }
@@ -310,7 +304,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
             ast::SelectItem::UnnamedExpr(expr) => {
                 let expr = Self::build_expr(expr, scope)?;
                 if let Expr::Column(index) = &expr {
-                    let label = scope.get_column_label(index)?;
+                    let label = scope.get_column_label(*index)?;
                     Ok((label.clone(), Some(expr)))
                 } else {
                     Ok((ColumnLabel::None, Some(expr)))
@@ -318,13 +312,10 @@ impl<'a, C: Catalog> Planner<'a, C> {
             }
             ast::SelectItem::ExprWithAlias { expr, alias } => {
                 let expr = Self::build_expr(expr, scope)?;
-                let label = ColumnLabel::Unqualified(ColumnName::new(alias.value.clone()));
+                let label = ColumnLabel::Unqualified(alias.value.clone());
                 Ok((label, Some(expr)))
             }
-            ast::SelectItem::Wildcard(_) => Ok((
-                ColumnLabel::Unqualified(ColumnName::new("*".to_string())),
-                None,
-            )),
+            ast::SelectItem::Wildcard(_) => Ok((ColumnLabel::Unqualified("*".to_string()), None)),
             _ => Err(Error::NotYetSupported(item.to_string())),
         }
     }
@@ -333,15 +324,13 @@ impl<'a, C: Catalog> Planner<'a, C> {
         log::debug!("Planning scan: {}", relation);
         match relation {
             ast::TableFactor::Table { name, alias, .. } => {
-                let table = TableName::new(name.to_string());
+                let table = name.to_string();
                 let table = self
                     .catalog
                     .get_table(&table)?
                     .ok_or_else(|| Error::TableDoesNotExist(table.clone()))?;
 
-                let alias = alias
-                    .as_ref()
-                    .map(|alias| TableName::new(alias.to_string()));
+                let alias = alias.as_ref().map(|alias| alias.to_string());
 
                 scope.add_table(&table, alias.as_ref())?;
 
@@ -514,7 +503,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
             }
             ast::Expr::Value(v) => Ok(Expr::Constant(Value::try_from_ast(&v.value, None)?)),
             ast::Expr::Identifier(i) => {
-                let name = ColumnName::new(i.value.clone());
+                let name = i.value.clone();
                 if let Some(index) = scope.get_column_index(None, &name) {
                     Ok(Expr::Column(index))
                 } else {
@@ -525,8 +514,8 @@ impl<'a, C: Catalog> Planner<'a, C> {
                 if idents.len() != 2 {
                     return Err(Error::NotYetSupported(expr.to_string()));
                 }
-                let table = TableName::new(idents[0].value.clone());
-                let column = ColumnName::new(idents[1].value.clone());
+                let table = idents[0].value.clone();
+                let column = idents[1].value.clone();
                 match scope.get_column_index(Some(&table), &column) {
                     Some(index) => Ok(Expr::Column(index)),
                     None => Err(Error::InvalidColumnLabel(format!("{}.{}", table, column))),

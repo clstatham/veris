@@ -1,5 +1,3 @@
-pub mod wrapper;
-
 #[cfg(test)]
 pub mod tests {
     #[macro_export]
