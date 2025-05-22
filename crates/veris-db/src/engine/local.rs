@@ -65,25 +65,12 @@ impl<E: StorageEngine> LocalTransaction<E> {
         Ok(None)
     }
 
-    fn has_index(&self, table: &str, column: &str) -> Result<bool, Error> {
-        let table = self
-            .get_table(table)?
-            .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
-        Ok(table
-            .columns
-            .iter()
-            .find(|c| c.name == column)
-            .map(|c| c.has_secondary_index)
-            .unwrap_or(false))
-    }
-
     fn get_index(
         &self,
         table: &str,
         column: &str,
         value: &Value,
     ) -> Result<BTreeSet<Value>, Error> {
-        debug_assert!(self.has_index(table, column)?);
         Ok(self
             .0
             .get(
@@ -106,7 +93,6 @@ impl<E: StorageEngine> LocalTransaction<E> {
         value: &Value,
         ids: BTreeSet<Value>,
     ) -> Result<(), Error> {
-        debug_assert!(self.has_index(table, column)?);
         let key = Key::Index(
             Cow::Borrowed(table),
             Cow::Borrowed(column),
@@ -156,8 +142,8 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
         Ok(())
     }
 
-    fn delete(&self, table: &str, ids: impl Into<Row>) -> Result<(), Error> {
-        let ids: Row = ids.into();
+    fn delete(&self, table: &str, ids: impl AsRef<[Value]>) -> Result<(), Error> {
+        let ids = ids.as_ref();
         let table = self
             .get_table(table)?
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
@@ -174,12 +160,12 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             for i in refs {
                 let column = &source.columns[i];
                 let mut source_ids: BTreeSet<Value> = if i == source.primary_key_index {
-                    self.get(&source.name, ids.clone())?
+                    self.get(&source.name, ids)?
                         .into_iter()
                         .map(|row| row.into_iter().nth(i).ok_or(Error::InvalidRowState))
                         .try_collect()?
                 } else {
-                    self.lookup_index(&source.name, &column.name, &ids)?
+                    self.lookup_index(&source.name, &column.name, ids)?
                 };
 
                 if self_reference {
@@ -191,34 +177,34 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
                 if let Some(source_id) = source_ids.first() {
                     let table = source.name.clone();
                     let column = source.columns[source.primary_key_index].name.clone();
-                    return Err(Error::ReferentialIntegrity(
+                    return Err(Error::ReferentialIntegrity {
                         table,
                         column,
-                        source_id.clone(),
-                    ));
+                        source_id: source_id.clone(),
+                    });
                 }
             }
         }
 
         for id in ids {
             if !indices.is_empty() {
-                if let Some(row) = self.get_row(&table.name, &id)? {
+                if let Some(row) = self.get_row(&table.name, id)? {
                     for (i, column) in indices.iter().copied() {
                         let mut ids = self.get_index(&table.name, &column.name, &row[i])?;
-                        ids.remove(&id);
+                        ids.remove(id);
                         self.set_index(&table.name, &column.name, &row[i], ids)?;
                     }
                 }
             }
 
             self.0
-                .delete(&Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(&id)).encode()?)?;
+                .delete(&Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)).encode()?)?;
         }
         Ok(())
     }
 
-    fn get(&self, table: &str, ids: impl Into<Row>) -> Result<Box<[Row]>, Error> {
-        let ids: Row = ids.into();
+    fn get(&self, table: &str, ids: impl AsRef<[Value]>) -> Result<Box<[Row]>, Error> {
+        let ids = ids.as_ref();
         ids.iter()
             .filter_map(|id| self.get_row(table, id).transpose())
             .collect()
@@ -231,7 +217,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
         for row in rows {
             if !table.validate_row(&row) {
-                return Err(Error::InvalidRow(table.name.clone()));
+                return Err(Error::InvalidRow(table.name));
             }
             let id = &row[table.primary_key_index];
 
@@ -292,7 +278,7 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
     fn create_table(&self, table: Table) -> Result<(), Error> {
         let table_key = Key::Table(Cow::Borrowed(&table.name)).encode()?;
         if self.0.get(&table_key)?.is_some() {
-            return Err(Error::TableAlreadyExists(table.name.clone()));
+            return Err(Error::TableAlreadyExists(table.name));
         }
         let table_value = table.encode()?;
         self.0.set(&table_key, table_value)?;

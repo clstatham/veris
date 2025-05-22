@@ -59,13 +59,13 @@ impl<E: Engine> Bench<E> {
         tx.commit().unwrap();
     }
 
-    fn delete(&self, rows: impl Into<Row>) {
+    fn delete(&self, rows: impl AsRef<[Value]>) {
         let tx = self.engine.begin().unwrap();
         tx.delete(&self.table.name, rows).unwrap();
         tx.commit().unwrap();
     }
 
-    fn get(&self, rows: impl Into<Row>) {
+    fn get(&self, rows: impl AsRef<[Value]>) {
         let tx = self.engine.begin().unwrap();
         let _ = tx.get(&self.table.name, rows).unwrap();
         tx.commit().unwrap();
@@ -103,7 +103,7 @@ impl<E: Engine> Bench<E> {
 
     fn bench_scan(&self, mode: &str, c: &mut Criterion, n: usize) {
         let rows = self.n_rows(n);
-        c.bench_function(&format!("{mode}_scan"), |b| {
+        c.bench_function(&format!("{mode}_scan_{n}"), |b| {
             b.iter_custom(|iters| {
                 self.create_table();
                 self.insert(rows.clone());
@@ -194,9 +194,10 @@ impl<E: Engine> Bench<E> {
 
 fn bench_memory(c: &mut Criterion) {
     let memory = Bench::new(Local::new(Memory::new()));
-    let n = 100;
     memory.bench_insert("memory", c);
-    memory.bench_scan("memory", c, n);
+    memory.bench_scan("memory", c, 1);
+    memory.bench_scan("memory", c, 10);
+    memory.bench_scan("memory", c, 100);
     memory.bench_delete("memory", c);
     memory.bench_get("memory", c);
     memory.bench_drop_table("memory", c);
@@ -206,9 +207,10 @@ fn bench_memory(c: &mut Criterion) {
 fn bench_bitcask(c: &mut Criterion) {
     let temp = tempfile::tempdir().unwrap();
     let bitcask = Bench::new(Local::new(Bitcask::new(&temp).unwrap()));
-    let n = 100;
     bitcask.bench_insert("bitcask", c);
-    bitcask.bench_scan("bitcask", c, n);
+    bitcask.bench_scan("bitcask", c, 1);
+    bitcask.bench_scan("bitcask", c, 10);
+    bitcask.bench_scan("bitcask", c, 100);
     bitcask.bench_delete("bitcask", c);
     bitcask.bench_get("bitcask", c);
     bitcask.bench_drop_table("bitcask", c);
@@ -221,7 +223,9 @@ fn main() {
         .sample_size(10)
         .measurement_time(Duration::from_secs(6))
         .configure_from_args();
+
     bench_memory(&mut criterion);
     bench_bitcask(&mut criterion);
+
     criterion.final_summary();
 }

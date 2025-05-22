@@ -70,7 +70,7 @@ impl<'a, T: Transaction> Executor<'a, T> {
         let mut rows = Vec::new();
         while let Some(values) = source.next().transpose()? {
             if !table.validate_row(&values) {
-                return Err(Error::InvalidRow(table.name.clone()));
+                return Err(Error::InvalidRow(table.name));
             }
             let mut casted_row = Vec::new();
             for (i, value) in values.iter().enumerate() {

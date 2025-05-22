@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashSet},
     hash::Hash,
+    io::{Read, Write},
     ops::Bound,
 };
 
@@ -29,6 +30,17 @@ pub fn bincode_serialize(value: &impl Serialize) -> Result<Box<[u8]>, Error> {
 pub fn bincode_deserialize<'de, T: Deserialize<'de>>(bytes: &'de [u8]) -> Result<T, Error> {
     bincode::serde::borrow_decode_from_slice(bytes, bincode_config())
         .map(|(t, _)| t)
+        .map_err(|e| Error::Serialization(e.to_string()))
+}
+
+pub fn bincode_serialize_into(value: &impl Serialize, w: &mut impl Write) -> Result<(), Error> {
+    bincode::serde::encode_into_std_write(value, w, bincode_config())
+        .map_err(|e| Error::Serialization(e.to_string()))
+        .map(|_| ())
+}
+
+pub fn bincode_deserialize_from<T: DeserializeOwned>(r: &mut impl Read) -> Result<T, Error> {
+    bincode::serde::decode_from_std_read(r, bincode_config())
         .map_err(|e| Error::Serialization(e.to_string()))
 }
 
@@ -69,6 +81,14 @@ pub trait ValueEncoding: Serialize + DeserializeOwned {
 
     fn encode(&self) -> Result<Box<[u8]>, Error> {
         bincode_serialize(self)
+    }
+
+    fn encode_into(&self, w: &mut impl Write) -> Result<(), Error> {
+        bincode_serialize_into(self, w)
+    }
+
+    fn decode_from(r: &mut impl Read) -> Result<Self, Error> {
+        bincode_deserialize_from(r)
     }
 }
 
@@ -355,7 +375,7 @@ impl<'de> KeycodeDeserializer<'de> {
         Ok(bytes)
     }
 
-    fn decode_next_byte_slice(&mut self) -> Result<Box<[u8]>, Error> {
+    fn decode_next_byte_slice(&mut self) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::new();
         let mut iter = self.bytes.iter().enumerate();
         let taken = loop {
@@ -370,7 +390,7 @@ impl<'de> KeycodeDeserializer<'de> {
             }
         };
         self.bytes = &self.bytes[taken..];
-        Ok(bytes.into())
+        Ok(bytes)
     }
 }
 

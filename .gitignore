@@ -1,3 +1,4 @@
 /target
 /**/.veris_history
 /data/*
+/profile.json.gz

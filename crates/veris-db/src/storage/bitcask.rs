@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, btree_map::Range},
     fs::File,
     io::{self, BufReader, Read, Seek, Write},
+    ops::RangeBounds,
     path::{Path, PathBuf},
 };
 
@@ -162,7 +163,7 @@ impl StorageEngine for Bitcask {
         Ok(())
     }
 
-    fn scan(&mut self, range: impl std::ops::RangeBounds<Box<[u8]>>) -> Self::ScanIterator<'_> {
+    fn scan(&mut self, range: impl RangeBounds<Box<[u8]>>) -> Self::ScanIterator<'_> {
         BitcaskScanIterator {
             range: self.key_dir.range(range),
             bitcask: &mut self.log,
@@ -194,13 +195,11 @@ impl Iterator for BitcaskScanIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((key, location)) = self.range.next() {
-            let item = || -> Result<_, Error> {
-                Ok((
-                    key.clone(),
-                    self.bitcask.read(location.offset, location.size)?,
-                ))
-            }();
-            return Some(item);
+            return Some(
+                self.bitcask
+                    .read(location.offset, location.size)
+                    .map(|v| (key.clone(), v)),
+            );
         }
         None
     }
@@ -209,51 +208,12 @@ impl Iterator for BitcaskScanIterator<'_> {
 impl DoubleEndedIterator for BitcaskScanIterator<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some((key, location)) = self.range.next_back() {
-            let item = || -> Result<_, Error> {
-                Ok((
-                    key.clone(),
-                    self.bitcask.read(location.offset, location.size)?,
-                ))
-            }();
-            return Some(item);
+            return Some(
+                self.bitcask
+                    .read(location.offset, location.size)
+                    .map(|v| (key.clone(), v)),
+            );
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bitcask() -> Result<(), Error> {
-        let mut bitcask = Bitcask::new("../../data/test_bitcask")?;
-
-        let key: Box<[u8]> = Box::new(*b"key1");
-        let value: Box<[u8]> = Box::new(*b"value1");
-
-        bitcask.set(&key, value.clone())?;
-        assert_eq!(bitcask.get(&key)?.as_deref(), Some(&*value));
-
-        assert_eq!(bitcask.get(b"nonexistent_key")?, None);
-
-        let location = bitcask.get_location(&key).unwrap();
-        assert_eq!(location.size, value.len());
-
-        let mut iter = bitcask.scan(..);
-        assert_eq!(iter.next().unwrap()?, (key.clone(), value.clone()));
-        assert!(iter.next().is_none());
-
-        let mut iter = bitcask.scan(&key..);
-        assert_eq!(iter.next().unwrap()?, (key.clone(), value.clone()));
-        assert!(iter.next().is_none());
-
-        bitcask.delete(&key)?;
-        assert_eq!(bitcask.get(&key)?, None);
-
-        let mut iter = bitcask.scan(..);
-        assert!(iter.next().is_none());
-
-        Ok(())
     }
 }

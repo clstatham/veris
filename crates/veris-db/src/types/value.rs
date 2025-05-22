@@ -1,7 +1,7 @@
 use std::{fmt, hash::Hash};
 
 use chrono::NaiveDate;
-use derive_more::{Deref, DerefMut, Into, IntoIterator};
+use derive_more::{AsRef, Deref, DerefMut, From, Index, IndexMut, Into, IntoIterator};
 use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
@@ -157,7 +157,10 @@ impl Value {
                 if length.is_none_or(|l| s.len() <= l as usize) {
                     Ok(Value::String(s.clone()))
                 } else {
-                    Err(Error::InvalidCast(self.clone(), *data_type))
+                    Err(Error::InvalidCast {
+                        value: self.clone(),
+                        to: *data_type,
+                    })
                 }
             }
             (Value::Date(d), DataType::Date) => Ok(Value::Date(*d)),
@@ -167,36 +170,56 @@ impl Value {
                     if let Some(s) = scale {
                         let f_str = f.to_string();
                         if f_str.len() > *p as usize {
-                            return Err(Error::InvalidCast(self.clone(), *data_type));
+                            return Err(Error::InvalidCast {
+                                value: self.clone(),
+                                to: *data_type,
+                            });
                         }
                         if let Some(dot_pos) = f_str.find('.') {
                             if f_str.len() - dot_pos - 1 > *s as usize {
-                                return Err(Error::InvalidCast(self.clone(), *data_type));
+                                return Err(Error::InvalidCast {
+                                    value: self.clone(),
+                                    to: *data_type,
+                                });
                             }
                         }
                     } else {
                         let f_str = f.to_string();
                         if f_str.len() > *p as usize {
-                            return Err(Error::InvalidCast(self.clone(), *data_type));
+                            return Err(Error::InvalidCast {
+                                value: self.clone(),
+                                to: *data_type,
+                            });
                         }
                     }
                 }
                 Ok(Value::Float(*f))
             }
 
-            (Value::String(s), DataType::Integer) => s
-                .parse::<i64>()
-                .map(Value::Integer)
-                .map_err(|_| Error::InvalidCast(self.clone(), *data_type)),
-            (Value::String(s), DataType::Float) => s
-                .parse::<f64>()
-                .map(Value::Float)
-                .map_err(|_| Error::InvalidCast(self.clone(), *data_type)),
+            (Value::String(s), DataType::Integer) => {
+                s.parse::<i64>()
+                    .map(Value::Integer)
+                    .map_err(|_| Error::InvalidCast {
+                        value: self.clone(),
+                        to: *data_type,
+                    })
+            }
+            (Value::String(s), DataType::Float) => {
+                s.parse::<f64>()
+                    .map(Value::Float)
+                    .map_err(|_| Error::InvalidCast {
+                        value: self.clone(),
+                        to: *data_type,
+                    })
+            }
             (Value::String(s), DataType::Date) => NaiveDate::parse_from_str(s, "%Y-%m-%d")
                 .map(Value::Date)
                 .map_err(|_| Error::InvalidDate(s.clone())),
 
-            _ => Err(Error::InvalidCast(self.clone(), *data_type)),
+            _ => Err(Error::InvalidCast {
+                value: self.clone(),
+                to: *data_type,
+            }),
         }
     }
 
@@ -435,7 +458,19 @@ impl From<NaiveDate> for Value {
 }
 
 #[derive(
-    Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Deref, DerefMut,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Deref,
+    DerefMut,
+    Index,
+    IndexMut,
 )]
 pub struct Row(Vec<Value>);
 
@@ -513,6 +548,19 @@ impl_into_row!(A, B, C, D, E);
 impl_into_row!(A, B, C, D, E, F);
 impl_into_row!(A, B, C, D, E, F, G);
 impl_into_row!(A, B, C, D, E, F, G, H);
+
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Deref, DerefMut, From, Into, AsRef, Index, IntoIterator,
+)]
+pub struct RowRef<'a> {
+    pub row: &'a Row,
+}
+
+impl<'a> RowRef<'a> {
+    pub fn new(row: &'a Row) -> Self {
+        RowRef { row }
+    }
+}
 
 pub trait RowIterImpl: Iterator<Item = Result<Row, Error>> + DynClone {}
 dyn_clone::clone_trait_object!(RowIterImpl);

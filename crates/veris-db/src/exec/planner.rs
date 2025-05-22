@@ -507,7 +507,7 @@ impl<'a, C: Catalog> Planner<'a, C> {
                 if let Some(index) = scope.get_column_index(None, &name) {
                     Ok(Expr::Column(index))
                 } else {
-                    Err(Error::InvalidColumnLabel(name.to_string()))
+                    Err(Error::InvalidColumnLabel(name))
                 }
             }
             ast::Expr::CompoundIdentifier(idents) => {

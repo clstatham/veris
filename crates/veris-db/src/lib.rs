@@ -9,6 +9,7 @@
         clippy::unimplemented,
     )
 )]
+#![warn(clippy::redundant_clone)]
 
 pub mod types;
 #[macro_use]

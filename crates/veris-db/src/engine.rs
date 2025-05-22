@@ -22,8 +22,8 @@ pub trait Transaction: Catalog {
     fn commit(self) -> Result<(), Error>;
     fn rollback(self) -> Result<(), Error>;
 
-    fn delete(&self, table: &str, ids: impl Into<Row>) -> Result<(), Error>;
-    fn get(&self, table: &str, ids: impl Into<Row>) -> Result<Box<[Row]>, Error>;
+    fn delete(&self, table: &str, ids: impl AsRef<[Value]>) -> Result<(), Error>;
+    fn get(&self, table: &str, ids: impl AsRef<[Value]>) -> Result<Box<[Row]>, Error>;
     fn insert(&self, table: &str, rows: impl Into<Rows>) -> Result<(), Error>;
     fn scan(&self, table: &str, filter: Option<Expr>) -> Result<RowIter, Error>;
     fn lookup_index(
