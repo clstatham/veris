@@ -1,47 +1,30 @@
 use std::{
     collections::{BTreeMap, btree_map::Range},
-    fs::File,
     io::{self, BufReader, Read, Seek, Write},
-    ops::RangeBounds,
-    path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
-
-use crate::error::Error;
+use crate::{ByteBounds, ByteVec, Bytes, KeyValue, ReadBytes, Result, WriteBytes};
 
 use super::engine::StorageEngine;
 
-pub type KeyDir = BTreeMap<Box<[u8]>, Location>;
+pub type KeyDir = BTreeMap<ByteVec, Location>;
 
-pub struct Bitcask {
+pub struct Bitcask<T: Read + Write + Seek> {
     key_dir: KeyDir,
-    log: Log,
+    log: Log<T>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
     pub offset: u64,
     pub size: usize,
 }
 
-impl Bitcask {
-    pub fn new(root: impl AsRef<Path>) -> Result<Self, Error> {
-        let root = root.as_ref().to_path_buf();
-        std::fs::create_dir_all(&root)?;
-        let filename = root.join("veris.db");
-        let file = File::options()
-            .create(true)
-            .append(true)
-            .read(true)
-            .write(false)
-            .open(&filename)?;
+impl<T: Read + Write + Seek> Bitcask<T> {
+    pub fn new(log: T) -> Result<Self> {
         let mut this = Self {
             key_dir: BTreeMap::new(),
-            log: Log {
-                file,
-                file_path: filename,
-            },
+            log: Log { file: log },
         };
 
         this.rebuild_key_dir()?;
@@ -49,11 +32,12 @@ impl Bitcask {
         Ok(this)
     }
 
-    fn rebuild_key_dir(&mut self) -> Result<(), Error> {
+    fn rebuild_key_dir(&mut self) -> Result<()> {
         self.key_dir.clear();
 
-        let file_length = self.log.file.metadata()?.len();
         let mut reader = BufReader::new(&mut self.log.file);
+        reader.seek(io::SeekFrom::Start(0))?;
+        let file_length = reader.seek(io::SeekFrom::End(0))?;
         let mut offset = reader.seek(io::SeekFrom::Start(0))?;
         while offset < file_length {
             let mut size = [0u8; 4];
@@ -86,9 +70,9 @@ impl Bitcask {
             offset += 8 + key_len as u64 + location.map_or(0, |v| v.size as u64);
 
             if let Some(location) = location {
-                self.key_dir.insert(key.into_boxed_slice(), location);
+                self.key_dir.insert(key, location);
             } else {
-                self.key_dir.remove(&*key);
+                self.key_dir.remove(&key);
             }
         }
 
@@ -100,27 +84,62 @@ impl Bitcask {
     }
 }
 
-pub struct Log {
-    pub file: File,
-    pub file_path: PathBuf,
+pub struct Log<T: Read + Write + Seek> {
+    pub file: T,
 }
 
-impl Log {
-    pub fn flush(&mut self) -> Result<(), Error> {
+impl<T: Read + Write + Seek> Log<T> {
+    pub fn flush(&mut self) -> Result<()> {
         self.file.flush()?;
-        self.file.sync_all()?;
         Ok(())
     }
 
-    pub fn read(&mut self, offset: u64, size: usize) -> Result<Box<[u8]>, Error> {
+    pub fn read_into<W>(&mut self, offset: u64, mut output: W) -> Result<()>
+    where
+        W: WriteBytes,
+    {
+        self.file.seek(io::SeekFrom::Start(offset))?;
+        std::io::copy(&mut self.file, &mut output)?;
+
+        Ok(())
+    }
+
+    pub fn read(&mut self, offset: u64, size: usize) -> Result<ByteVec> {
         let mut buf = vec![0; size];
         self.file.seek(io::SeekFrom::Start(offset))?;
         self.file.read_exact(&mut buf)?;
 
-        Ok(buf.into_boxed_slice())
+        Ok(buf)
     }
 
-    pub fn write_entry(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<Location, Error> {
+    pub fn write_entry_from<R>(
+        &mut self,
+        key: &[u8],
+        value: R,
+        value_size: usize,
+    ) -> Result<Location>
+    where
+        R: ReadBytes,
+    {
+        let offset = self.file.seek(io::SeekFrom::End(0))?;
+
+        self.file.write_all(&(key.len() as u32).to_be_bytes())?;
+
+        self.file.write_all(&(value_size as i32).to_be_bytes())?;
+
+        self.file.write_all(key)?;
+        if value_size > 0 {
+            std::io::copy(&mut value.take(value_size as u64), &mut self.file)?;
+        }
+        self.file.flush()?;
+
+        Ok(Location {
+            offset: offset + 8 + key.len() as u64,
+            size: value_size,
+        })
+    }
+
+    pub fn write_entry(&mut self, key: &[u8], value: Option<&[u8]>) -> Result<Location> {
         let offset = self.file.seek(io::SeekFrom::End(0))?;
         let value_length = value.map_or(-1, |v| v.len() as i32);
 
@@ -141,15 +160,27 @@ impl Log {
     }
 }
 
-impl StorageEngine for Bitcask {
-    type ScanIterator<'a> = BitcaskScanIterator<'a>;
+impl<T: Read + Write + Seek + 'static> StorageEngine for Bitcask<T> {
+    type ScanIterator<'a> = BitcaskScanIterator<'a, T>;
 
-    fn flush(&mut self) -> Result<(), Error> {
+    fn flush(&mut self) -> Result<()> {
         self.log.flush()?;
         Ok(())
     }
 
-    fn get(&mut self, key: &[u8]) -> Result<Option<Box<[u8]>>, Error> {
+    fn get_into<W>(&mut self, key: &[u8], output: W) -> Result<Option<usize>>
+    where
+        W: WriteBytes,
+    {
+        if let Some(location) = self.get_location(key) {
+            let size = location.size;
+            self.log.read_into(location.offset, output)?;
+            return Ok(Some(size));
+        }
+        Ok(None)
+    }
+
+    fn get(&mut self, key: &[u8]) -> Result<Option<ByteVec>> {
         if let Some(location) = self.get_location(key) {
             let data = self.log.read(location.offset, location.size)?;
             return Ok(Some(data));
@@ -157,27 +188,39 @@ impl StorageEngine for Bitcask {
         Ok(None)
     }
 
-    fn set(&mut self, key: &[u8], value: Box<[u8]>) -> Result<(), Error> {
-        let location = self.log.write_entry(key, Some(&value))?;
-        self.key_dir.insert(key.into(), location);
+    fn set_from<R>(&mut self, key: &[u8], value: R, value_size: usize) -> Result<()>
+    where
+        R: ReadBytes,
+    {
+        let location = self.log.write_entry_from(key, value, value_size)?;
+        self.key_dir.insert(key.to_vec(), location);
         Ok(())
     }
 
-    fn scan(&mut self, range: impl RangeBounds<Box<[u8]>>) -> Self::ScanIterator<'_> {
+    fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let location = self.log.write_entry(key, Some(value))?;
+        self.key_dir.insert(key.to_vec(), location);
+        Ok(())
+    }
+
+    fn scan<B>(&mut self, range: B) -> Self::ScanIterator<'_>
+    where
+        B: ByteBounds,
+    {
         BitcaskScanIterator {
             range: self.key_dir.range(range),
             bitcask: &mut self.log,
         }
     }
 
-    fn delete(&mut self, key: &[u8]) -> Result<(), Error> {
+    fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.log.write_entry(key, None)?;
         self.key_dir.remove(key);
         Ok(())
     }
 }
 
-impl Drop for Bitcask {
+impl<T: Read + Write + Seek> Drop for Bitcask<T> {
     fn drop(&mut self) {
         if let Err(e) = self.log.flush() {
             eprintln!("Error flushing log: {}", e);
@@ -185,35 +228,173 @@ impl Drop for Bitcask {
     }
 }
 
-pub struct BitcaskScanIterator<'a> {
-    range: Range<'a, Box<[u8]>, Location>,
-    bitcask: &'a mut Log,
+pub struct BitcaskScanIterator<'a, T: Read + Write + Seek> {
+    range: Range<'a, ByteVec, Location>,
+    bitcask: &'a mut Log<T>,
 }
 
-impl Iterator for BitcaskScanIterator<'_> {
-    type Item = Result<(Box<[u8]>, Box<[u8]>), Error>;
+impl<'a, T: Read + Write + Seek> Iterator for BitcaskScanIterator<'a, T> {
+    type Item = Result<KeyValue<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some((key, location)) = self.range.next() {
-            return Some(
-                self.bitcask
-                    .read(location.offset, location.size)
-                    .map(|v| (key.clone(), v)),
-            );
+            let res = self.bitcask.read(location.offset, location.size);
+            Some(res.map(|v| (Bytes::Borrowed(key.as_ref()), Bytes::Owned(v))))
+        } else {
+            None
         }
-        None
     }
 }
 
-impl DoubleEndedIterator for BitcaskScanIterator<'_> {
+impl<T: Read + Write + Seek> DoubleEndedIterator for BitcaskScanIterator<'_, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if let Some((key, location)) = self.range.next_back() {
-            return Some(
-                self.bitcask
-                    .read(location.offset, location.size)
-                    .map(|v| (key.clone(), v)),
-            );
+            let res = self.bitcask.read(location.offset, location.size);
+            Some(res.map(|v| (Bytes::Borrowed(key.as_ref()), Bytes::Owned(v))))
+        } else {
+            None
         }
-        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use itertools::Itertools;
+
+    use crate::storage::engine::StorageEngine;
+
+    use super::*;
+
+    fn create_test_bitcask() -> Bitcask<Cursor<Vec<u8>>> {
+        // Bitcask::new(tempfile::tempfile().unwrap()).unwrap()
+        Bitcask::new(Cursor::new(Vec::new())).unwrap()
+    }
+
+    #[test]
+    fn test_bitcask() {
+        let data: Vec<(&[u8], &[u8])> = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+        ];
+
+        let mut bitcask = create_test_bitcask();
+
+        for (key, value) in &data {
+            bitcask.set(key, value).unwrap();
+        }
+
+        for (key, value) in &data {
+            let result = bitcask.get(key).unwrap();
+            assert_eq!(result, Some(value.to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_bitcask_get_location() {
+        let data: Vec<(&[u8], &[u8])> = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+        ];
+
+        let mut bitcask = create_test_bitcask();
+
+        for (key, value) in &data {
+            bitcask.set(key, value).unwrap();
+        }
+
+        for (key, value) in &data {
+            let location = bitcask.get_location(key).unwrap();
+            assert_eq!(location.size, value.len());
+            assert!(location.offset > 0);
+        }
+    }
+
+    #[test]
+    fn test_bitcask_scan() {
+        let data: Vec<(&[u8], &[u8])> = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+        ];
+
+        let mut bitcask = create_test_bitcask();
+
+        for (key, value) in &data {
+            bitcask.set(key, value).unwrap();
+        }
+
+        let scan_iter: Vec<_> = bitcask.scan(..).try_collect().unwrap();
+        assert_eq!(scan_iter.len(), data.len());
+
+        for (result, (key, value)) in scan_iter.iter().zip(data.iter()) {
+            assert_eq!(result.0, Bytes::Borrowed(key));
+            assert_eq!(result.1, Bytes::Owned(value.to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_bitcask_delete() {
+        let data: Vec<(&[u8], &[u8])> = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+        ];
+
+        let mut bitcask = create_test_bitcask();
+
+        for (key, value) in &data {
+            bitcask.set(key, value).unwrap();
+        }
+
+        bitcask.delete(b"key2").unwrap();
+
+        assert_eq!(bitcask.get(b"key2").unwrap(), None);
+    }
+
+    #[test]
+    fn test_bitcask_rebuild_key_dir() {
+        let data: Vec<(&[u8], &[u8])> = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+        ];
+
+        let mut bitcask = create_test_bitcask();
+
+        for (key, value) in &data {
+            bitcask.set(key, value).unwrap();
+        }
+
+        bitcask.rebuild_key_dir().unwrap();
+
+        for (key, value) in &data {
+            let result = bitcask.get(key).unwrap();
+            assert_eq!(result, Some(value.to_vec()));
+        }
+    }
+
+    #[test]
+    fn test_bitcask_location() {
+        let data: Vec<(&[u8], &[u8])> = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+        ];
+
+        let mut bitcask = create_test_bitcask();
+
+        for (key, value) in &data {
+            bitcask.set(key, value).unwrap();
+        }
+
+        for (key, _) in &data {
+            let location = bitcask.get_location(key).unwrap();
+            assert_eq!(location.size, 6); // 6 bytes for "valueX"
+            assert!(location.offset > 0);
+        }
     }
 }

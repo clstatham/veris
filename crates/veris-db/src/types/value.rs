@@ -1,7 +1,7 @@
 use std::{fmt, hash::Hash};
 
 use chrono::NaiveDate;
-use derive_more::{AsRef, Deref, DerefMut, From, Index, IndexMut, Into, IntoIterator};
+use derive_more::{Deref, DerefMut, Index, IndexMut, Into, IntoIterator};
 use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
@@ -548,19 +548,6 @@ impl_into_row!(A, B, C, D, E);
 impl_into_row!(A, B, C, D, E, F);
 impl_into_row!(A, B, C, D, E, F, G);
 impl_into_row!(A, B, C, D, E, F, G, H);
-
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Deref, DerefMut, From, Into, AsRef, Index, IntoIterator,
-)]
-pub struct RowRef<'a> {
-    pub row: &'a Row,
-}
-
-impl<'a> RowRef<'a> {
-    pub fn new(row: &'a Row) -> Self {
-        RowRef { row }
-    }
-}
 
 pub trait RowIterImpl: Iterator<Item = Result<Row, Error>> + DynClone {}
 dyn_clone::clone_trait_object!(RowIterImpl);

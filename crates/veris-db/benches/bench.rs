@@ -1,13 +1,17 @@
-use std::{hint::black_box, time::Duration};
+use std::{
+    hint::black_box,
+    io::Cursor,
+    time::{Duration, Instant},
+};
 
 use criterion::Criterion;
 use itertools::Itertools;
 use veris_db::{
     engine::{Catalog, Engine, Transaction, local::Local},
-    storage::{bitcask::Bitcask, memory::Memory},
+    storage::bitcask::Bitcask,
     types::{
         schema::{Column, Table},
-        value::{DataType, Row, Rows, Value},
+        value::{DataType, Row, Value},
     },
 };
 
@@ -29,13 +33,13 @@ impl<E: Engine> Bench<E> {
 
     fn create_table(&self) {
         let tx = self.engine.begin().unwrap();
-        tx.create_table(self.table.clone()).unwrap();
+        tx.create_table(black_box(self.table.clone())).unwrap();
         tx.commit().unwrap();
     }
 
     fn drop_table(&self) {
         let tx = self.engine.begin().unwrap();
-        tx.drop_table(&self.table.name).unwrap();
+        tx.drop_table(black_box(&self.table.name)).unwrap();
         tx.commit().unwrap();
     }
 
@@ -46,28 +50,34 @@ impl<E: Engine> Bench<E> {
         tx.commit().unwrap();
     }
 
-    fn insert(&self, rows: impl Into<Rows>) {
+    fn insert(&self, rows: impl AsRef<[Row]>) {
         let tx = self.engine.begin().unwrap();
-        tx.insert(&self.table.name, rows).unwrap();
+        tx.insert(black_box(&self.table.name), black_box(rows))
+            .unwrap();
         tx.commit().unwrap();
     }
 
     fn scan(&self) {
         let tx = self.engine.begin().unwrap();
-        let rows = tx.scan(&self.table.name, None).unwrap();
+        let rows = tx
+            .scan(black_box(&self.table.name), black_box(None))
+            .unwrap();
         black_box(rows.collect::<Vec<_>>());
         tx.commit().unwrap();
     }
 
     fn delete(&self, rows: impl AsRef<[Value]>) {
         let tx = self.engine.begin().unwrap();
-        tx.delete(&self.table.name, rows).unwrap();
+        tx.delete(black_box(&self.table.name), black_box(rows))
+            .unwrap();
         tx.commit().unwrap();
     }
 
     fn get(&self, rows: impl AsRef<[Value]>) {
         let tx = self.engine.begin().unwrap();
-        let _ = tx.get(&self.table.name, rows).unwrap();
+        let _ = tx
+            .get(black_box(&self.table.name), black_box(rows))
+            .unwrap();
         tx.commit().unwrap();
     }
 
@@ -86,13 +96,13 @@ impl<E: Engine> Bench<E> {
     fn bench_insert(&self, mode: &str, c: &mut Criterion) {
         c.bench_function(&format!("{mode}_insert"), |b| {
             b.iter_custom(|iters| {
-                let mut delta = std::time::Duration::ZERO;
+                let mut delta = Duration::ZERO;
                 self.create_table();
                 for i in 0..iters {
                     let rows = vec![self.row(i as i64)];
 
-                    let now = std::time::Instant::now();
-                    self.insert(black_box(rows));
+                    let now = Instant::now();
+                    self.insert(rows);
                     delta += now.elapsed();
                 }
                 self.drop_table();
@@ -103,34 +113,28 @@ impl<E: Engine> Bench<E> {
 
     fn bench_scan(&self, mode: &str, c: &mut Criterion, n: usize) {
         let rows = self.n_rows(n);
+        self.create_table();
+        self.insert(rows.clone());
         c.bench_function(&format!("{mode}_scan_{n}"), |b| {
-            b.iter_custom(|iters| {
-                self.create_table();
-                self.insert(rows.clone());
-                let mut delta = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let now = std::time::Instant::now();
-                    self.scan();
-                    delta += now.elapsed();
-                }
-                self.drop_table();
-                delta
+            b.iter(|| {
+                self.scan();
             });
         });
+        self.drop_table();
     }
 
     fn bench_delete(&self, mode: &str, c: &mut Criterion) {
         c.bench_function(&format!("{mode}_delete"), |b| {
             b.iter_custom(|iters| {
-                let mut delta = std::time::Duration::ZERO;
+                let mut delta = Duration::ZERO;
                 let rows = self.n_rows(iters as usize);
                 self.create_table();
                 self.insert(rows.clone());
                 for i in 0..iters {
                     let rows = vec![Value::Integer(i as i64)];
 
-                    let now = std::time::Instant::now();
-                    self.delete(black_box(rows));
+                    let now = Instant::now();
+                    self.delete(rows);
                     delta += now.elapsed();
                 }
                 self.drop_table();
@@ -142,15 +146,15 @@ impl<E: Engine> Bench<E> {
     fn bench_get(&self, mode: &str, c: &mut Criterion) {
         c.bench_function(&format!("{mode}_get"), |b| {
             b.iter_custom(|iters| {
-                let mut delta = std::time::Duration::ZERO;
+                let mut delta = Duration::ZERO;
                 let rows = self.n_rows(iters as usize);
                 self.create_table();
                 self.insert(rows);
                 for i in 0..iters {
                     let rows = vec![Value::Integer(i as i64)];
 
-                    let now = std::time::Instant::now();
-                    self.get(black_box(rows));
+                    let now = Instant::now();
+                    self.get(rows);
                     delta += now.elapsed();
                 }
                 self.drop_table();
@@ -162,11 +166,11 @@ impl<E: Engine> Bench<E> {
     fn bench_drop_table(&self, mode: &str, c: &mut Criterion) {
         c.bench_function(&format!("{mode}_drop_table"), |b| {
             b.iter_custom(|iters| {
-                let mut delta = std::time::Duration::ZERO;
+                let mut delta = Duration::ZERO;
                 for _ in 0..iters {
                     self.create_table();
 
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     self.drop_table();
                     delta += now.elapsed();
                 }
@@ -178,10 +182,10 @@ impl<E: Engine> Bench<E> {
     fn bench_show_tables(&self, mode: &str, c: &mut Criterion) {
         c.bench_function(&format!("{mode}_show_tables"), |b| {
             b.iter_custom(|iters| {
-                let mut delta = std::time::Duration::ZERO;
+                let mut delta = Duration::ZERO;
                 self.create_table();
                 for _ in 0..iters {
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     self.show_tables();
                     delta += now.elapsed();
                 }
@@ -192,40 +196,26 @@ impl<E: Engine> Bench<E> {
     }
 }
 
-fn bench_memory(c: &mut Criterion) {
-    let memory = Bench::new(Local::new(Memory::new()));
-    memory.bench_insert("memory", c);
-    memory.bench_scan("memory", c, 1);
-    memory.bench_scan("memory", c, 10);
-    memory.bench_scan("memory", c, 100);
-    memory.bench_delete("memory", c);
-    memory.bench_get("memory", c);
-    memory.bench_drop_table("memory", c);
-    memory.bench_show_tables("memory", c);
-}
-
-fn bench_bitcask(c: &mut Criterion) {
-    let temp = tempfile::tempdir().unwrap();
-    let bitcask = Bench::new(Local::new(Bitcask::new(&temp).unwrap()));
-    bitcask.bench_insert("bitcask", c);
-    bitcask.bench_scan("bitcask", c, 1);
-    bitcask.bench_scan("bitcask", c, 10);
-    bitcask.bench_scan("bitcask", c, 100);
-    bitcask.bench_delete("bitcask", c);
-    bitcask.bench_get("bitcask", c);
-    bitcask.bench_drop_table("bitcask", c);
-    bitcask.bench_show_tables("bitcask", c);
-    temp.close().unwrap();
+fn bench_engine<E: Engine>(c: &mut Criterion, engine: &str, factory: impl Fn() -> Bench<E>) {
+    factory().bench_insert(engine, c);
+    factory().bench_scan(engine, c, 1);
+    factory().bench_scan(engine, c, 100);
+    factory().bench_scan(engine, c, 10000);
+    factory().bench_delete(engine, c);
+    factory().bench_get(engine, c);
+    factory().bench_drop_table(engine, c);
+    factory().bench_show_tables(engine, c);
 }
 
 fn main() {
-    let mut criterion = Criterion::default()
-        .sample_size(10)
-        .measurement_time(Duration::from_secs(6))
-        .configure_from_args();
+    let mut criterion = Criterion::default().sample_size(10).configure_from_args();
 
-    bench_memory(&mut criterion);
-    bench_bitcask(&mut criterion);
+    // bench_engine(&mut criterion, "memory", || {
+    //     Bench::new(Local::new(Memory::new()))
+    // });
+    bench_engine(&mut criterion, "bitcask", || {
+        Bench::new(Local::new(Bitcask::new(Cursor::new(vec![])).unwrap()))
+    });
 
     criterion.final_summary();
 }

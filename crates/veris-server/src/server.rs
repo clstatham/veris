@@ -1,3 +1,5 @@
+use std::io::Cursor;
+
 use sqlparser::{dialect::GenericDialect, parser::Parser};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -12,7 +14,7 @@ use veris_net::request::{Request, Response};
 
 use crate::Config;
 
-pub type Engine = Bitcask;
+pub type Engine = Bitcask<Cursor<Vec<u8>>>;
 
 pub struct Server {
     config: Config,
@@ -21,8 +23,14 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config) -> Self {
-        log::info!("Loading database at {}", config.db_path.display());
-        let engine = Local::new(Engine::new(&config.db_path).unwrap());
+        // log::info!("Loading database at {}", config.db_path.display());
+        // let file = std::fs::OpenOptions::new()
+        //     .read(true)
+        //     .append(true)
+        //     .create(true)
+        //     .open(&config.db_path)
+        //     .unwrap();
+        let engine = Local::new(Engine::new(Cursor::new(Vec::new())).unwrap());
         Self { config, engine }
     }
 

@@ -5,9 +5,11 @@ use crate::{
     exec::expr::Expr,
     types::{
         schema::Table,
-        value::{Row, RowIter, Rows, Value},
+        value::{Row, RowIter, Value},
     },
 };
+
+pub use self::local::*;
 
 pub mod local;
 
@@ -24,7 +26,7 @@ pub trait Transaction: Catalog {
 
     fn delete(&self, table: &str, ids: impl AsRef<[Value]>) -> Result<(), Error>;
     fn get(&self, table: &str, ids: impl AsRef<[Value]>) -> Result<Box<[Row]>, Error>;
-    fn insert(&self, table: &str, rows: impl Into<Rows>) -> Result<(), Error>;
+    fn insert(&self, table: &str, rows: impl AsRef<[Row]>) -> Result<(), Error>;
     fn scan(&self, table: &str, filter: Option<Expr>) -> Result<RowIter, Error>;
     fn lookup_index(
         &self,

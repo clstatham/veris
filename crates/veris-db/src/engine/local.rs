@@ -13,7 +13,7 @@ use crate::{
     },
     types::{
         schema::Table,
-        value::{Row, RowIter, Rows, Value},
+        value::{Row, RowIter, Value},
     },
 };
 
@@ -58,9 +58,8 @@ pub struct LocalTransaction<E: StorageEngine>(MvccTransaction<E>);
 impl<E: StorageEngine> LocalTransaction<E> {
     fn get_row(&self, table: &str, id: &Value) -> Result<Option<Row>, Error> {
         let key = Key::Row(Cow::Borrowed(table), Cow::Borrowed(id)).encode()?;
-        if let Some(value) = self.0.get(&key)? {
-            let row = Row::decode(&value)?;
-            return Ok(Some(row));
+        if let Some(row) = self.0.get(&key)? {
+            return Ok(Some(Row::decode(&row)?));
         }
         Ok(None)
     }
@@ -91,7 +90,7 @@ impl<E: StorageEngine> LocalTransaction<E> {
         table: &str,
         column: &str,
         value: &Value,
-        ids: BTreeSet<Value>,
+        ids: &BTreeSet<Value>,
     ) -> Result<(), Error> {
         let key = Key::Index(
             Cow::Borrowed(table),
@@ -102,7 +101,7 @@ impl<E: StorageEngine> LocalTransaction<E> {
         if ids.is_empty() {
             self.0.delete(&key)?;
         } else {
-            self.0.set(&key, ids.encode()?)?;
+            self.0.set(&key, &ids.encode()?)?;
         }
 
         Ok(())
@@ -192,7 +191,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
                     for (i, column) in indices.iter().copied() {
                         let mut ids = self.get_index(&table.name, &column.name, &row[i])?;
                         ids.remove(id);
-                        self.set_index(&table.name, &column.name, &row[i], ids)?;
+                        self.set_index(&table.name, &column.name, &row[i], &ids)?;
                     }
                 }
             }
@@ -210,20 +209,19 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             .collect()
     }
 
-    fn insert(&self, table: &str, rows: impl Into<Rows>) -> Result<(), Error> {
-        let rows: Rows = rows.into();
+    fn insert(&self, table: &str, rows: impl AsRef<[Row]>) -> Result<(), Error> {
+        let rows = rows.as_ref();
         let table = self
             .get_table(table)?
             .ok_or(Error::TableDoesNotExist(table.to_owned()))?;
-        for row in rows {
-            if !table.validate_row(&row) {
+        for row in rows.iter() {
+            if !table.validate_row(row) {
                 return Err(Error::InvalidRow(table.name));
             }
             let id = &row[table.primary_key_index];
 
             let key = Key::Row(Cow::Borrowed(&table.name), Cow::Borrowed(id)).encode()?;
-            let value = row.encode()?;
-            self.0.set(&key, value)?;
+            self.0.set(&key, &row.encode()?)?;
 
             for (i, column) in table
                 .columns
@@ -233,7 +231,7 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
             {
                 let mut ids = self.get_index(&table.name, &column.name, &row[i])?;
                 ids.insert(id.clone());
-                self.set_index(&table.name, &column.name, &row[i], ids)?;
+                self.set_index(&table.name, &column.name, &row[i], &ids)?;
             }
         }
         Ok(())
@@ -280,8 +278,7 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
         if self.0.get(&table_key)?.is_some() {
             return Err(Error::TableAlreadyExists(table.name));
         }
-        let table_value = table.encode()?;
-        self.0.set(&table_key, table_value)?;
+        self.0.set(&table_key, &table.encode()?)?;
         Ok(())
     }
 
@@ -323,9 +320,8 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
 
     fn get_table(&self, table: &str) -> Result<Option<Table>, Error> {
         let table_key = Key::Table(Cow::Borrowed(table)).encode()?;
-        if let Some(table_value) = self.0.get(&table_key)? {
-            let table = Table::decode(&table_value)?;
-            return Ok(Some(table));
+        if let Some(table) = self.0.get(&table_key)? {
+            return Ok(Some(Table::decode(&table)?));
         }
         Ok(None)
     }
@@ -336,5 +332,245 @@ impl<E: StorageEngine> Catalog for LocalTransaction<E> {
             .scan_prefix(&prefix)?
             .map(|r| r.and_then(|(_, v)| Table::decode(&v)))
             .try_collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::*;
+
+    fn create_test_engine() -> Local<Bitcask<Cursor<Vec<u8>>>> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        Local::new(engine)
+    }
+
+    fn create_test_table() -> Table {
+        Table {
+            name: "test".to_owned(),
+            primary_key_index: 0,
+            columns: vec![
+                Column {
+                    name: "id".to_owned(),
+                    data_type: DataType::Integer,
+                    references: None,
+                    has_secondary_index: false,
+                    nullable: false,
+                },
+                Column {
+                    name: "name".to_owned(),
+                    data_type: DataType::String { length: None },
+                    references: None,
+                    has_secondary_index: true,
+                    nullable: false,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_create_table() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+        let tables = tx.list_tables().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, table.name);
+        assert_eq!(tables[0].columns.len(), table.columns.len());
+    }
+
+    #[test]
+    fn test_drop_table() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+        tx.drop_table(&table.name).unwrap();
+        let tables = tx.list_tables().unwrap();
+        assert_eq!(tables.len(), 0);
+    }
+
+    #[test]
+    fn test_insert() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let rows = vec![
+            Row::from(vec![Value::Integer(1), Value::String("Alice".to_owned())]),
+            Row::from(vec![Value::Integer(2), Value::String("Bob".to_owned())]),
+        ];
+        tx.insert(&table.name, rows).unwrap();
+
+        let result = tx.get(&table.name, vec![Value::Integer(1)]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0][0], Value::Integer(1));
+        assert_eq!(result[0][1], Value::String("Alice".to_owned()));
+    }
+
+    #[test]
+    fn test_delete() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let rows = vec![
+            Row::from(vec![Value::Integer(1), Value::String("Alice".to_owned())]),
+            Row::from(vec![Value::Integer(2), Value::String("Bob".to_owned())]),
+        ];
+        tx.insert(&table.name, rows).unwrap();
+
+        tx.delete(&table.name, vec![Value::Integer(1)]).unwrap();
+        let result = tx.get(&table.name, vec![Value::Integer(1)]).unwrap();
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_scan() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let rows = vec![
+            Row::from(vec![Value::Integer(1), Value::String("Alice".to_owned())]),
+            Row::from(vec![Value::Integer(2), Value::String("Bob".to_owned())]),
+        ];
+        tx.insert(&table.name, rows).unwrap();
+
+        let result = tx.scan(&table.name, None).unwrap();
+        assert_eq!(result.count(), 2);
+    }
+
+    #[test]
+    fn test_get() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let rows = vec![
+            Row::from(vec![Value::Integer(1), Value::String("Alice".to_owned())]),
+            Row::from(vec![Value::Integer(2), Value::String("Bob".to_owned())]),
+        ];
+        tx.insert(&table.name, rows).unwrap();
+
+        let result = tx.get(&table.name, vec![Value::Integer(1)]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0][0], Value::Integer(1));
+        assert_eq!(result[0][1], Value::String("Alice".to_owned()));
+    }
+
+    #[test]
+    fn test_get_index() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let rows = vec![
+            Row::from(vec![Value::Integer(1), Value::String("Alice".to_owned())]),
+            Row::from(vec![Value::Integer(2), Value::String("Bob".to_owned())]),
+        ];
+        tx.insert(&table.name, rows).unwrap();
+
+        let result = tx
+            .get_index(&table.name, "name", &Value::String("Alice".to_owned()))
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.iter().next().unwrap(), &Value::Integer(1));
+    }
+
+    #[test]
+    fn test_set_index() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let rows = vec![
+            Row::from(vec![Value::Integer(1), Value::String("Alice".to_owned())]),
+            Row::from(vec![Value::Integer(2), Value::String("Bob".to_owned())]),
+        ];
+        tx.insert(&table.name, rows).unwrap();
+
+        let mut ids = BTreeSet::new();
+        ids.insert(Value::Integer(1));
+        tx.set_index(
+            &table.name,
+            "name",
+            &Value::String("Alice".to_owned()),
+            &ids,
+        )
+        .unwrap();
+
+        let result = tx
+            .get_index(&table.name, "name", &Value::String("Alice".to_owned()))
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.iter().next().unwrap(), &Value::Integer(1));
+    }
+
+    #[test]
+    fn test_table_refs() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let refs = tx.table_refs(&table.name).unwrap();
+        assert_eq!(refs.len(), 0);
+    }
+
+    #[test]
+    fn test_list_tables() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let tables = tx.list_tables().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, table.name);
+    }
+
+    #[test]
+    fn test_get_table() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+
+        let result = tx.get_table(&table.name).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, table.name);
+    }
+
+    #[test]
+    fn test_get_table_not_found() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let result = tx.get_table("non_existent_table");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_table_already_exists() {
+        let engine = create_test_engine();
+        let tx = engine.begin().unwrap();
+        let table = create_test_table();
+        tx.create_table(table.clone()).unwrap();
+        let result = tx.create_table(table);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            Error::TableAlreadyExists("test".to_owned())
+        );
     }
 }

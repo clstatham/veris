@@ -1,7 +1,6 @@
 use std::{
-    borrow::Cow,
     collections::{BTreeSet, VecDeque},
-    ops::{Bound, RangeBounds},
+    ops::Bound,
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -9,14 +8,9 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    encoding::{
-        KeyEncoding, ValueEncoding, bincode_deserialize, bincode_serialize, key_prefix_range,
-    },
-    error::Error,
-    storage::engine::StorageEngine,
+    ByteBounds, ByteVec, Bytes, Error, KeyEncoding, ScanIterator, StorageEngine, ValueEncoding,
+    bincode_deserialize, bincode_serialize, key_prefix_range,
 };
-
-use super::engine::ScanIterator;
 
 pub type Version = u64;
 
@@ -29,20 +23,20 @@ pub enum Key<'a> {
     ActiveTransactionSnapshot(Version),
     TransactionWrite(
         Version,
-        #[serde(with = "serde_bytes")]
         #[serde(borrow)]
-        Cow<'a, [u8]>,
+        #[serde(with = "serde_bytes")]
+        Bytes<'a>,
     ),
     Version(
-        #[serde(with = "serde_bytes")]
         #[serde(borrow)]
-        Cow<'a, [u8]>,
+        #[serde(with = "serde_bytes")]
+        Bytes<'a>,
         Version,
     ),
     Unversioned(
-        #[serde(with = "serde_bytes")]
         #[serde(borrow)]
-        Cow<'a, [u8]>,
+        #[serde(with = "serde_bytes")]
+        Bytes<'a>,
     ),
 }
 
@@ -55,42 +49,48 @@ pub enum KeyPrefix<'a> {
     ActiveTransactionSnapshot,
     TransactionWrite(Version),
     Version(
-        #[serde(with = "serde_bytes")]
         #[serde(borrow)]
-        Cow<'a, [u8]>,
+        #[serde(with = "serde_bytes")]
+        Bytes<'a>,
     ),
     Unversioned,
 }
 
 impl<'a> KeyEncoding<'a> for KeyPrefix<'a> {}
 
-pub struct Mvcc<E: StorageEngine>(Arc<Mutex<E>>);
+pub struct Mvcc<E: StorageEngine> {
+    engine: Arc<Mutex<E>>,
+}
 
 impl<E: StorageEngine> Mvcc<E> {
     pub fn new(engine: E) -> Self {
-        Self(Arc::new(Mutex::new(engine)))
+        Self {
+            engine: Arc::new(Mutex::new(engine)),
+        }
     }
 
     pub fn begin(&self) -> Result<MvccTransaction<E>, Error> {
-        let mut engine = self.0.lock()?;
+        let mut engine = self.engine.lock()?;
+
         let version = match engine.get(&Key::NextVersion.encode()?)? {
             Some(v) => Version::decode(&v)?,
             None => 1,
         };
-        engine.set(&Key::NextVersion.encode()?, (version + 1).encode()?)?;
+
+        engine.set(&Key::NextVersion.encode()?, &(version + 1).encode()?)?;
 
         let active_txns = Self::scan_active_txns(&mut engine)?;
         if !active_txns.is_empty() {
             engine.set(
                 &Key::ActiveTransactionSnapshot(version).encode()?,
-                active_txns.encode()?,
+                &active_txns.encode()?,
             )?;
         }
-        engine.set(&Key::ActiveTransaction(version).encode()?, Box::new([]))?;
+        engine.set(&Key::ActiveTransaction(version).encode()?, &[])?;
         drop(engine);
 
         Ok(MvccTransaction {
-            engine: self.0.clone(),
+            engine: self.engine.clone(),
             state: MvccTransactionState {
                 version,
                 read_only: false,
@@ -142,7 +142,7 @@ impl MvccTransactionState {
 }
 
 impl<E: StorageEngine> MvccTransaction<E> {
-    fn write_version(&self, key: &[u8], value: Option<Box<[u8]>>) -> Result<(), Error> {
+    fn write_version(&self, key: &[u8], value: Option<&[u8]>) -> Result<(), Error> {
         if self.state.read_only {
             return Err(Error::TransactionReadOnly);
         }
@@ -150,7 +150,7 @@ impl<E: StorageEngine> MvccTransaction<E> {
         let mut engine = self.engine.lock()?;
 
         let from = Key::Version(
-            Cow::Borrowed(key),
+            Bytes::Borrowed(key),
             self.state
                 .active_txns
                 .iter()
@@ -159,7 +159,7 @@ impl<E: StorageEngine> MvccTransaction<E> {
                 .unwrap_or(self.state.version + 1),
         )
         .encode()?;
-        let to = Key::Version(Cow::Borrowed(key), Version::MAX).encode()?;
+        let to = Key::Version(Bytes::Borrowed(key), Version::MAX).encode()?;
         if let Some((key, _)) = engine.scan(from..=to).last().transpose()? {
             match Key::decode(&key)? {
                 Key::Version(_, version) => {
@@ -176,13 +176,13 @@ impl<E: StorageEngine> MvccTransaction<E> {
         }
 
         engine.set(
-            &Key::TransactionWrite(self.state.version, Cow::Borrowed(key)).encode()?,
-            Box::new([]),
+            &Key::TransactionWrite(self.state.version, Bytes::Borrowed(key)).encode()?,
+            &[],
         )?;
 
         engine.set(
-            &Key::Version(Cow::Borrowed(key), self.state.version).encode()?,
-            bincode_serialize(&value)?,
+            &Key::Version(Bytes::Borrowed(key), self.state.version).encode()?,
+            &bincode_serialize(&value)?,
         )?;
 
         Ok(())
@@ -196,7 +196,7 @@ impl<E: StorageEngine> MvccTransaction<E> {
         let mut engine = self.engine.lock()?;
         let to_remove: Vec<_> = engine
             .scan_prefix(&KeyPrefix::TransactionWrite(self.state.version).encode()?)
-            .map_ok(|(k, _)| k)
+            .map_ok(|(key, _)| key.into_owned())
             .try_collect()?;
         for key in to_remove {
             engine.delete(&key)?;
@@ -229,7 +229,7 @@ impl<E: StorageEngine> MvccTransaction<E> {
                 }
             }
 
-            rollback.push(key);
+            rollback.push(key.into_owned());
         }
 
         drop(scan);
@@ -247,15 +247,15 @@ impl<E: StorageEngine> MvccTransaction<E> {
         self.write_version(key, None)
     }
 
-    pub fn set(&self, key: &[u8], value: Box<[u8]>) -> Result<(), Error> {
+    pub fn set(&self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         self.write_version(key, Some(value))
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Option<Box<[u8]>>, Error> {
+    pub fn get(&self, key: &[u8]) -> Result<Option<ByteVec>, Error> {
         let mut engine = self.engine.lock()?;
 
-        let from = Key::Version(Cow::Borrowed(key), 0).encode()?;
-        let to = Key::Version(Cow::Borrowed(key), self.state.version).encode()?;
+        let from = Key::Version(Bytes::Borrowed(key), 0).encode()?;
+        let to = Key::Version(Bytes::Borrowed(key), self.state.version).encode()?;
         let mut scan = engine.scan(from..=to).rev();
         while let Some((key, value)) = scan.next().transpose()? {
             match Key::decode(&key)? {
@@ -275,19 +275,19 @@ impl<E: StorageEngine> MvccTransaction<E> {
         Ok(None)
     }
 
-    pub fn scan(&self, range: impl RangeBounds<Box<[u8]>>) -> Result<MvccScanIterator<E>, Error> {
+    pub fn scan(&self, range: impl ByteBounds) -> Result<MvccScanIterator<E>, Error> {
         let start = match range.start_bound() {
             Bound::Excluded(k) => {
-                Bound::Excluded(Key::Version(Cow::Borrowed(k), Version::MAX).encode()?)
+                Bound::Excluded(Key::Version(Bytes::Borrowed(k), Version::MAX).encode()?)
             }
-            Bound::Included(k) => Bound::Included(Key::Version(Cow::Borrowed(k), 0).encode()?),
-            Bound::Unbounded => Bound::Included(Key::Version(Cow::Borrowed(&[]), 0).encode()?),
+            Bound::Included(k) => Bound::Included(Key::Version(Bytes::Borrowed(k), 0).encode()?),
+            Bound::Unbounded => Bound::Included(Key::Version(Bytes::Borrowed(&[]), 0).encode()?),
         };
 
         let end = match range.end_bound() {
-            Bound::Excluded(k) => Bound::Excluded(Key::Version(Cow::Borrowed(k), 0).encode()?),
+            Bound::Excluded(k) => Bound::Excluded(Key::Version(Bytes::Borrowed(k), 0).encode()?),
             Bound::Included(k) => {
-                Bound::Included(Key::Version(Cow::Borrowed(k), Version::MAX).encode()?)
+                Bound::Included(Key::Version(Bytes::Borrowed(k), Version::MAX).encode()?)
             }
             Bound::Unbounded => Bound::Excluded(KeyPrefix::Unversioned.encode()?),
         };
@@ -300,9 +300,11 @@ impl<E: StorageEngine> MvccTransaction<E> {
     }
 
     pub fn scan_prefix(&self, prefix: &[u8]) -> Result<MvccScanIterator<E>, Error> {
-        let mut prefix = KeyPrefix::Version(Cow::Borrowed(prefix)).encode()?.to_vec();
-        prefix.truncate(prefix.len() - 2);
+        let mut prefix = KeyPrefix::Version(Bytes::Borrowed(prefix)).encode()?;
+        prefix.pop();
+        prefix.pop();
         let range = key_prefix_range(&prefix);
+
         Ok(MvccScanIterator::new(
             self.engine.clone(),
             self.state.clone(),
@@ -314,8 +316,8 @@ impl<E: StorageEngine> MvccTransaction<E> {
 pub struct MvccScanIterator<E: StorageEngine> {
     engine: Arc<Mutex<E>>,
     state: MvccTransactionState,
-    buffer: VecDeque<(Box<[u8]>, Box<[u8]>)>,
-    remainder: Option<(Bound<Box<[u8]>>, Bound<Box<[u8]>>)>,
+    buffer: VecDeque<(ByteVec, ByteVec)>,
+    remainder: Option<(Bound<ByteVec>, Bound<ByteVec>)>,
 }
 
 impl<E: StorageEngine> Clone for MvccScanIterator<E> {
@@ -335,7 +337,7 @@ impl<E: StorageEngine> MvccScanIterator<E> {
     fn new(
         engine: Arc<Mutex<E>>,
         state: MvccTransactionState,
-        range: (Bound<Box<[u8]>>, Bound<Box<[u8]>>),
+        range: (Bound<ByteVec>, Bound<ByteVec>),
     ) -> Self {
         Self {
             engine,
@@ -350,14 +352,15 @@ impl<E: StorageEngine> MvccScanIterator<E> {
             return Ok(());
         }
 
-        let Some(range) = self.remainder.take() else {
+        let Some((range_start, range_end)) = self.remainder.take() else {
             return Ok(());
         };
-        let range_end = range.1.clone();
 
         let mut storage = self.engine.lock()?;
 
-        let mut scan = VersionIterator::new(&self.state, storage.scan(range)).peekable();
+        let mut scan =
+            VersionIterator::new(&self.state, storage.scan((range_start, range_end.clone())))
+                .peekable();
 
         while let Some((key, _, value)) = scan.next().transpose()? {
             match scan.peek() {
@@ -373,7 +376,7 @@ impl<E: StorageEngine> MvccScanIterator<E> {
             if self.buffer.len() == Self::BUFFER_SIZE {
                 if let Some((next, version, _)) = scan.next().transpose()? {
                     let range_start =
-                        Bound::Included(Key::Version(Cow::Borrowed(&next), version).encode()?);
+                        Bound::Included(Key::Version(Bytes::Borrowed(&next), version).encode()?);
                     self.remainder = Some((range_start, range_end));
                 }
                 return Ok(());
@@ -385,7 +388,7 @@ impl<E: StorageEngine> MvccScanIterator<E> {
 }
 
 impl<E: StorageEngine> Iterator for MvccScanIterator<E> {
-    type Item = Result<(Box<[u8]>, Box<[u8]>), Error>;
+    type Item = Result<(ByteVec, ByteVec), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.buffer.is_empty() {
@@ -397,34 +400,37 @@ impl<E: StorageEngine> Iterator for MvccScanIterator<E> {
     }
 }
 
-struct VersionIterator<'a, I: ScanIterator> {
+struct VersionIterator<'a, I: ScanIterator<'a>> {
     txn: &'a MvccTransactionState,
     inner: I,
 }
 
-impl<'a, I: ScanIterator> VersionIterator<'a, I> {
+impl<'a, I: ScanIterator<'a>> VersionIterator<'a, I> {
     fn new(txn: &'a MvccTransactionState, inner: I) -> Self {
         Self { txn, inner }
     }
 
-    fn try_next(&mut self) -> Result<Option<(Box<[u8]>, Version, Box<[u8]>)>, Error> {
+    fn try_next(&mut self) -> Result<Option<(ByteVec, Version, Bytes<'a>)>, Error> {
         while let Some((key, value)) = self.inner.next().transpose()? {
-            let Key::Version(key, version) = Key::decode(&key)? else {
-                return Err(Error::InvalidEngineState(format!(
-                    "expected a Version key, got {key:?}"
-                )));
+            let (key, version) = match Key::decode(&key)? {
+                Key::Version(key, version) => (key.into_owned(), version),
+                key => {
+                    return Err(Error::InvalidEngineState(format!(
+                        "expected a Version key, got {key:?}"
+                    )));
+                }
             };
-            if !self.txn.is_version_visible(version) {
-                continue;
+
+            if self.txn.is_version_visible(version) {
+                return Ok(Some((key, version, value)));
             }
-            return Ok(Some((key.into_owned().into(), version, value)));
         }
         Ok(None)
     }
 }
 
-impl<'a, I: ScanIterator> Iterator for VersionIterator<'a, I> {
-    type Item = Result<(Box<[u8]>, Version, Box<[u8]>), Error>;
+impl<'a, I: ScanIterator<'a>> Iterator for VersionIterator<'a, I> {
+    type Item = Result<(ByteVec, Version, Bytes<'a>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.try_next().transpose()
@@ -433,23 +439,119 @@ impl<'a, I: ScanIterator> Iterator for VersionIterator<'a, I> {
 
 #[cfg(test)]
 mod tests {
-    use crate::storage::memory::Memory;
+    use std::io::Cursor;
+
+    use crate::*;
 
     use super::*;
 
     #[test]
-    fn test_mvcc() -> Result<(), Error> {
-        let engine = Mvcc::new(Memory::new());
-        let txn = engine.begin()?;
-        assert_eq!(txn.state.version, 1);
-        txn.set(b"key", (*b"value").into())?;
-        assert_eq!(txn.get(b"key")?, Some((*b"value").into()));
+    fn test_mvcc() -> Result<()> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        let mvcc = Mvcc::new(engine);
+
+        let txn = mvcc.begin()?;
+        txn.set(b"key", b"value")?;
         txn.commit()?;
 
-        let txn = engine.begin()?;
-        assert_eq!(txn.state.version, 2);
-        assert_eq!(txn.get(b"key")?, Some((*b"value").into()));
+        let txn = mvcc.begin()?;
+        assert_eq!(txn.get(b"key")?, Some(b"value".to_vec()));
         txn.rollback()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_rollback() -> Result<()> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        let mvcc = Mvcc::new(engine);
+
+        let txn = mvcc.begin()?;
+        txn.set(b"key", b"value")?;
+        txn.commit()?;
+
+        let txn = mvcc.begin()?;
+        txn.set(b"key", b"new_value")?;
+        txn.rollback()?;
+
+        let txn = mvcc.begin()?;
+        assert_eq!(txn.get(b"key")?, Some(b"value".to_vec()));
+        txn.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_scan() -> Result<()> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        let mvcc = Mvcc::new(engine);
+
+        let txn = mvcc.begin()?;
+        txn.set(b"key1", b"value1")?;
+        txn.set(b"key2", b"value2")?;
+        txn.commit()?;
+
+        let txn = mvcc.begin()?;
+        let mut scan = txn.scan_prefix(b"key")?;
+        assert_eq!(
+            scan.next().transpose()?,
+            Some((b"key1".to_vec(), b"value1".to_vec()))
+        );
+        assert_eq!(
+            scan.next().transpose()?,
+            Some((b"key2".to_vec(), b"value2".to_vec()))
+        );
+        assert_eq!(scan.next().transpose()?, None);
+        txn.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_scan_empty() -> Result<()> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        let mvcc = Mvcc::new(engine);
+
+        let txn = mvcc.begin()?;
+        let mut scan = txn.scan_prefix(b"key")?;
+        assert_eq!(scan.next().transpose()?, None);
+        txn.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_get() -> Result<()> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        let mvcc = Mvcc::new(engine);
+
+        let txn = mvcc.begin()?;
+        txn.set(b"key", b"value")?;
+        txn.commit()?;
+
+        let txn = mvcc.begin()?;
+        assert_eq!(txn.get(b"key")?, Some(b"value".to_vec()));
+        txn.commit()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mvcc_delete() -> Result<()> {
+        let engine = Bitcask::new(Cursor::new(Vec::new())).unwrap();
+        let mvcc = Mvcc::new(engine);
+
+        let txn = mvcc.begin()?;
+        txn.set(b"key", b"value")?;
+        txn.commit()?;
+
+        let txn = mvcc.begin()?;
+        txn.delete(b"key")?;
+        txn.commit()?;
+
+        let txn = mvcc.begin()?;
+        assert_eq!(txn.get(b"key")?, None);
+        txn.commit()?;
 
         Ok(())
     }

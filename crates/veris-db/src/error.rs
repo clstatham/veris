@@ -6,6 +6,8 @@ use thiserror::Error;
 
 use crate::types::value::{ColumnLabel, DataType, Value};
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug, Error, PartialEq, Clone, Display)]
 pub enum Error {
     AggregateNotFound(String),
