@@ -6,28 +6,43 @@ use dyn_clone::DynClone;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast;
 
-use crate::{encoding::ValueEncoding, error::Error};
+use crate::{Result, encoding::ValueEncoding, error::Error};
 
+/// The data type of a value in the database.
 #[derive(Clone, Default, Copy, Debug, PartialEq, Hash, Serialize, Deserialize, Eq)]
 pub enum DataType {
+    /// A boolean value.
     Boolean,
+
+    /// An integer value.
     #[default]
     Integer,
+
+    /// A floating-point value.
     Float,
+
+    /// A decimal value.
     Decimal {
+        /// The maximum number of digits in the number.
         precision: Option<u64>,
+        /// The number of digits to the right of the decimal point.
         scale: Option<u64>,
     },
+
+    /// A string value.
     String {
+        /// The maximum length of the string.
         length: Option<u64>,
     },
+
+    /// A date value.
     Date,
 }
 
 impl TryFrom<&ast::DataType> for DataType {
     type Error = Error;
 
-    fn try_from(value: &ast::DataType) -> Result<Self, Self::Error> {
+    fn try_from(value: &ast::DataType) -> Result<Self> {
         match value {
             ast::DataType::Boolean => Ok(DataType::Boolean),
             ast::DataType::Integer(_) | ast::DataType::Int(_) => Ok(DataType::Integer),
@@ -68,7 +83,7 @@ impl fmt::Display for DataType {
             DataType::Decimal {
                 precision: Some(p),
                 scale: Some(s),
-            } => write!(f, "DECIMAL({}, {})", p, s),
+            } => write!(f, "DECIMAL({},{})", p, s),
             DataType::Decimal {
                 precision: Some(p),
                 scale: None,
@@ -76,7 +91,7 @@ impl fmt::Display for DataType {
             DataType::Decimal {
                 precision: None,
                 scale: Some(s),
-            } => write!(f, "DECIMAL(0, {})", s),
+            } => write!(f, "DECIMAL(0,{})", s),
             DataType::Decimal {
                 precision: None,
                 scale: None,
@@ -90,23 +105,37 @@ impl fmt::Display for DataType {
     }
 }
 
+/// A value in the database.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Value {
+    /// A null value.
     Null,
+
+    /// A boolean value.
     Boolean(bool),
+
+    /// An integer value.
     Integer(i64),
+
+    /// A floating-point value.
     Float(f64),
+
+    /// A string value.
     String(String),
+
+    /// A date value.
     Date(NaiveDate),
 }
 
 impl ValueEncoding for Value {}
 
 impl Value {
+    /// Returns whether the value is a true boolean value.
     pub fn is_truthy(&self) -> bool {
         matches!(self, Value::Boolean(true))
     }
 
+    /// Checks if the value is compatible with the given data type.
     pub fn is_compatible(&self, data_type: &DataType) -> bool {
         match (self, data_type) {
             (Value::Null, _) => true,
@@ -147,7 +176,8 @@ impl Value {
         }
     }
 
-    pub fn try_cast(&self, data_type: &DataType) -> Result<Value, Error> {
+    /// Attempts to cast the value to the given data type.
+    pub fn try_cast(&self, data_type: &DataType) -> Result<Value> {
         match (self, data_type) {
             (Value::Null, _) => Ok(Value::Null),
             (Value::Boolean(b), DataType::Boolean) => Ok(Value::Boolean(*b)),
@@ -223,7 +253,8 @@ impl Value {
         }
     }
 
-    pub fn try_from_ast(value: &ast::Value, type_hint: Option<DataType>) -> Result<Self, Error> {
+    /// Attempts to create a value from an AST value and an optional type hint.
+    pub fn try_from_ast(value: &ast::Value, type_hint: Option<DataType>) -> Result<Self> {
         match value {
             ast::Value::Null => Ok(Value::Null),
             ast::Value::Boolean(b) => Ok(Value::Boolean(*b)),
@@ -277,6 +308,7 @@ impl Value {
         }
     }
 
+    /// Returns whether the value is undefined (null or NaN).
     pub fn is_undefined(&self) -> bool {
         match self {
             Self::Null => true,
@@ -285,7 +317,9 @@ impl Value {
         }
     }
 
-    pub fn checked_add(&self, other: &Self) -> Result<Self, Error> {
+    /// Attempts to add two values together.
+    /// This may result in a different type than one of the original values (e.g. adding an integer and a float results in a float).
+    pub fn checked_add(&self, other: &Self) -> Result<Self> {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
                 a.checked_add(*b).ok_or(Error::IntegerOverflow)?,
@@ -298,7 +332,9 @@ impl Value {
         }
     }
 
-    pub fn checked_div(&self, other: &Self) -> Result<Self, Error> {
+    /// Attempts to divide two values.
+    /// This may result in a different type than one of the original values (e.g. dividing an integer by a float results in a float).
+    pub fn checked_div(&self, other: &Self) -> Result<Self> {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
                 a.checked_div(*b).ok_or(Error::IntegerOverflow)?,
@@ -311,7 +347,9 @@ impl Value {
         }
     }
 
-    pub fn checked_sub(&self, other: &Self) -> Result<Self, Error> {
+    /// Attempts to subtract two values.
+    /// This may result in a different type than one of the original values (e.g. subtracting an integer from a float results in a float).
+    pub fn checked_sub(&self, other: &Self) -> Result<Self> {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
                 a.checked_sub(*b).ok_or(Error::IntegerOverflow)?,
@@ -324,7 +362,9 @@ impl Value {
         }
     }
 
-    pub fn checked_mul(&self, other: &Self) -> Result<Self, Error> {
+    /// Attempts to multiply two values.
+    /// This may result in a different type than one of the original values (e.g. multiplying an integer and a float results in a float).
+    pub fn checked_mul(&self, other: &Self) -> Result<Self> {
         match (self, other) {
             (Value::Integer(a), Value::Integer(b)) => Ok(Value::Integer(
                 a.checked_mul(*b).ok_or(Error::IntegerOverflow)?,
@@ -457,6 +497,7 @@ impl From<NaiveDate> for Value {
     }
 }
 
+/// A row of values in the database.
 #[derive(
     Clone,
     Debug,
@@ -475,6 +516,13 @@ impl From<NaiveDate> for Value {
 pub struct Row(Vec<Value>);
 
 impl ValueEncoding for Row {}
+
+impl Row {
+    /// Creates a new row from a vector of values.
+    pub fn new(values: impl Into<Row>) -> Self {
+        values.into()
+    }
+}
 
 impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -500,40 +548,27 @@ impl IntoIterator for Row {
     }
 }
 
-pub trait IntoRow {
-    fn into_row(self) -> Row;
-}
-
-impl<T> From<T> for Row
-where
-    T: IntoRow,
-{
-    fn from(value: T) -> Self {
-        value.into_row()
+impl From<Vec<Value>> for Row {
+    fn from(value: Vec<Value>) -> Self {
+        Row(value)
     }
 }
 
-impl IntoRow for Vec<Value> {
-    fn into_row(self) -> Row {
-        Row(self)
-    }
-}
-
-impl IntoRow for Box<[Value]> {
-    fn into_row(self) -> Row {
-        Row(self.into_vec())
+impl<const N: usize> From<[Value; N]> for Row {
+    fn from(value: [Value; N]) -> Self {
+        Row(value.to_vec())
     }
 }
 
 macro_rules! impl_into_row {
     ($($name:ident),+) => {
         #[allow(non_snake_case)]
-        impl<$($name),+> IntoRow for ($($name,)+)
+        impl<$($name),+> From<($($name,)+)> for Row
         where
             $($name: Into<Value>,)+
         {
-            fn into_row(self) -> Row {
-                let ($($name,)+) = self;
+            fn from(value: ($($name,)+)) -> Self {
+                let ($($name,)+) = value;
                 Row(vec![$($name.into()),+])
             }
         }
@@ -549,73 +584,69 @@ impl_into_row!(A, B, C, D, E, F);
 impl_into_row!(A, B, C, D, E, F, G);
 impl_into_row!(A, B, C, D, E, F, G, H);
 
-pub trait RowIterImpl: Iterator<Item = Result<Row, Error>> + DynClone {}
+/// A trait for iterating over rows.
+/// It is implemented for any cloneable type that implements the `Iterator` trait and returns `Result<Row>`.
+pub trait RowIterImpl: Iterator<Item = Result<Row>> + DynClone {}
 dyn_clone::clone_trait_object!(RowIterImpl);
-impl<T: Iterator<Item = Result<Row, Error>> + DynClone> RowIterImpl for T {}
+impl<T: Iterator<Item = Result<Row>> + DynClone> RowIterImpl for T {}
 
+/// A wrapper around a row iterator.
+/// This allows for dynamic dispatch of row iterators.
 #[derive(Clone, Deref, DerefMut, Into)]
 pub struct RowIter(Box<dyn RowIterImpl>);
 
 impl RowIter {
+    /// Creates a new `RowIter` from a row iterator.
     pub fn new(rows: impl RowIterImpl + 'static) -> Self {
         RowIter(Box::new(rows))
     }
 
+    /// Creates a new `RowIter` from a boxed row iterator.
     pub fn new_boxed(rows: Box<dyn RowIterImpl>) -> Self {
         RowIter(rows)
     }
 }
 
 impl Iterator for RowIter {
-    type Item = Result<Row, Error>;
+    type Item = Result<Row>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
     }
 }
 
+/// A collection of rows.
+/// This is a wrapper around a vector of `Row` objects.
 #[derive(Clone, Debug, Serialize, Deserialize, Deref, DerefMut, IntoIterator)]
 pub struct Rows(Vec<Row>);
 
 impl Rows {
+    /// Creates a new `Rows` object.
     pub fn new(rows: impl Into<Vec<Row>>) -> Self {
         Rows(rows.into())
     }
 
+    /// Creates a new `Rows` object from a vector of rows.
+    pub fn from_vec(rows: Vec<Row>) -> Self {
+        Rows(rows)
+    }
+
+    /// Consumes and converts the `Rows` object into a vector of rows.
     pub fn into_row_vec(self) -> Vec<Row> {
         self.0
-    }
-}
-
-pub trait IntoRows {
-    fn into_rows(self) -> Rows;
-}
-
-impl<T> From<T> for Rows
-where
-    T: IntoRows,
-{
-    fn from(value: T) -> Self {
-        value.into_rows()
-    }
-}
-
-impl IntoRows for Vec<Row> {
-    fn into_rows(self) -> Rows {
-        Rows(self)
     }
 }
 
 macro_rules! impl_into_rows {
     ($($name:ident),+) => {
         #[allow(non_snake_case)]
-        impl<$($name),+> IntoRows for ($($name,)+)
+        impl<$($name),+> From<($($name,)+)> for Rows
         where
-            $($name: IntoRow + 'static,)+
+            $($name: Into<Row>,)+
         {
-            fn into_rows(self) -> Rows {
-                let ($($name,)+) = self;
-                Rows::new(vec![$($name.into_row()),+])
+            fn from(value: ($($name,)+)) -> Self {
+                let ($($name,)+) = value;
+                Rows(vec![$($name.into()),+])
             }
         }
     };
@@ -630,11 +661,25 @@ impl_into_rows!(A, B, C, D, E, F);
 impl_into_rows!(A, B, C, D, E, F, G);
 impl_into_rows!(A, B, C, D, E, F, G, H);
 
+/// A label for a column in a query.
+/// This can be either a qualified name (e.g. `table.column`), an unqualified name (e.g. `column`),
+/// or no name at all.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ColumnLabel {
+    /// No label.
     None,
-    Unqualified(String),
-    Qualified(String, String),
+    /// An unqualified label (e.g. `column`).
+    Unqualified(
+        /// The name of the column.
+        String,
+    ),
+    /// A qualified label (e.g. `table.column`).
+    Qualified(
+        /// The name of the table.
+        String,
+        /// The name of the column.
+        String,
+    ),
 }
 
 impl ColumnLabel {
@@ -657,7 +702,7 @@ impl ColumnLabel {
 impl TryFrom<&ast::ObjectName> for ColumnLabel {
     type Error = Error;
 
-    fn try_from(value: &ast::ObjectName) -> Result<Self, Self::Error> {
+    fn try_from(value: &ast::ObjectName) -> Result<Self> {
         if value.0.len() == 1 {
             Ok(ColumnLabel::Unqualified(value.0[0].to_string()))
         } else if value.0.len() == 2 {

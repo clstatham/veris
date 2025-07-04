@@ -1,3 +1,4 @@
+#![doc = include_str!("../../../README.md")]
 #![allow(clippy::type_complexity)]
 #![cfg_attr(
     not(test),
@@ -10,6 +11,7 @@
     )
 )]
 #![warn(clippy::redundant_clone)]
+#![cfg_attr(doc, warn(missing_docs))]
 
 pub mod types;
 #[macro_use]

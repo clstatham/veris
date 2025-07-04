@@ -31,54 +31,73 @@ impl<E: Engine> Bench<E> {
         Self { engine, table }
     }
 
-    fn create_table(&self) {
+    fn create_table(&self) -> Duration {
         let tx = self.engine.begin().unwrap();
+        let now = Instant::now();
         tx.create_table(black_box(self.table.clone())).unwrap();
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
-    fn drop_table(&self) {
+    fn drop_table(&self) -> Duration {
         let tx = self.engine.begin().unwrap();
+        let now = Instant::now();
         tx.drop_table(black_box(&self.table.name)).unwrap();
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
-    fn show_tables(&self) {
+    fn show_tables(&self) -> Duration {
         let tx = self.engine.begin().unwrap();
-        let tables = tx.list_tables().unwrap();
-        black_box(tables);
+        let now = Instant::now();
+        black_box(tx.list_tables()).unwrap();
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
-    fn insert(&self, rows: impl AsRef<[Row]>) {
+    fn insert(&self, rows: impl AsRef<[Row]>) -> Duration {
         let tx = self.engine.begin().unwrap();
+        let now = Instant::now();
         tx.insert(black_box(&self.table.name), black_box(rows))
             .unwrap();
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
-    fn scan(&self) {
+    fn scan(&self) -> Duration {
         let tx = self.engine.begin().unwrap();
+        let now = Instant::now();
         let rows = tx
             .scan(black_box(&self.table.name), black_box(None))
             .unwrap();
         black_box(rows.collect::<Vec<_>>());
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
-    fn delete(&self, rows: impl AsRef<[Value]>) {
+    fn delete(&self, rows: impl AsRef<[Value]>) -> Duration {
         let tx = self.engine.begin().unwrap();
+        let now = Instant::now();
         tx.delete(black_box(&self.table.name), black_box(rows))
             .unwrap();
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
-    fn get(&self, rows: impl AsRef<[Value]>) {
+    fn get(&self, rows: impl AsRef<[Value]>) -> Duration {
         let tx = self.engine.begin().unwrap();
-        let _ = tx
-            .get(black_box(&self.table.name), black_box(rows))
+        let now = Instant::now();
+        tx.get(black_box(&self.table.name), black_box(rows))
             .unwrap();
+        let delta = now.elapsed();
         tx.commit().unwrap();
+        delta
     }
 
     fn row(&self, id: i64) -> Row {
@@ -101,9 +120,7 @@ impl<E: Engine> Bench<E> {
                 for i in 0..iters {
                     let rows = vec![self.row(i as i64)];
 
-                    let now = Instant::now();
-                    self.insert(rows);
-                    delta += now.elapsed();
+                    delta += self.insert(rows);
                 }
                 self.drop_table();
                 delta
@@ -116,8 +133,12 @@ impl<E: Engine> Bench<E> {
         self.create_table();
         self.insert(rows.clone());
         c.bench_function(&format!("{mode}_scan_{n}"), |b| {
-            b.iter(|| {
-                self.scan();
+            b.iter_custom(|iters| {
+                let mut delta = Duration::ZERO;
+                for _ in 0..iters {
+                    delta += self.scan();
+                }
+                delta
             });
         });
         self.drop_table();
@@ -133,9 +154,7 @@ impl<E: Engine> Bench<E> {
                 for i in 0..iters {
                     let rows = vec![Value::Integer(i as i64)];
 
-                    let now = Instant::now();
-                    self.delete(rows);
-                    delta += now.elapsed();
+                    delta += self.delete(rows);
                 }
                 self.drop_table();
                 delta
@@ -153,9 +172,7 @@ impl<E: Engine> Bench<E> {
                 for i in 0..iters {
                     let rows = vec![Value::Integer(i as i64)];
 
-                    let now = Instant::now();
-                    self.get(rows);
-                    delta += now.elapsed();
+                    delta += self.get(rows);
                 }
                 self.drop_table();
                 delta
@@ -170,9 +187,7 @@ impl<E: Engine> Bench<E> {
                 for _ in 0..iters {
                     self.create_table();
 
-                    let now = Instant::now();
-                    self.drop_table();
-                    delta += now.elapsed();
+                    delta += self.drop_table();
                 }
                 delta
             });
@@ -185,9 +200,7 @@ impl<E: Engine> Bench<E> {
                 let mut delta = Duration::ZERO;
                 self.create_table();
                 for _ in 0..iters {
-                    let now = Instant::now();
-                    self.show_tables();
-                    delta += now.elapsed();
+                    delta += self.show_tables();
                 }
                 self.drop_table();
                 delta
@@ -196,7 +209,11 @@ impl<E: Engine> Bench<E> {
     }
 }
 
-fn bench_engine<E: Engine>(c: &mut Criterion, engine: &str, factory: impl Fn() -> Bench<E>) {
+fn bench_engine<E, F>(c: &mut Criterion, engine: &str, factory: F)
+where
+    E: Engine,
+    F: Fn() -> Bench<E>,
+{
     factory().bench_insert(engine, c);
     factory().bench_scan(engine, c, 1);
     factory().bench_scan(engine, c, 100);
@@ -210,9 +227,6 @@ fn bench_engine<E: Engine>(c: &mut Criterion, engine: &str, factory: impl Fn() -
 fn main() {
     let mut criterion = Criterion::default().sample_size(10).configure_from_args();
 
-    // bench_engine(&mut criterion, "memory", || {
-    //     Bench::new(Local::new(Memory::new()))
-    // });
     bench_engine(&mut criterion, "bitcask", || {
         Bench::new(Local::new(Bitcask::new(Cursor::new(vec![])).unwrap()))
     });

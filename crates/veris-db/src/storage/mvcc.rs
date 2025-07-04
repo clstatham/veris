@@ -164,7 +164,7 @@ impl<E: StorageEngine> MvccTransaction<E> {
             match Key::decode(&key)? {
                 Key::Version(_, version) => {
                     if !self.state.is_version_visible(version) {
-                        return Err(Error::OutOfOrder);
+                        return Err(Error::OutOfOrder("version".to_string()));
                     }
                 }
                 key => {

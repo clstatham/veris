@@ -14,11 +14,11 @@ use veris_net::request::{Request, Response};
 
 use crate::Config;
 
-pub type Engine = Bitcask<Cursor<Vec<u8>>>;
+pub type Engine = Local<Bitcask<Cursor<Vec<u8>>>>;
 
 pub struct Server {
     config: Config,
-    engine: Local<Engine>,
+    engine: Engine,
 }
 
 impl Server {
@@ -30,7 +30,7 @@ impl Server {
         //     .create(true)
         //     .open(&config.db_path)
         //     .unwrap();
-        let engine = Local::new(Engine::new(Cursor::new(Vec::new())).unwrap());
+        let engine = Local::new(Bitcask::new(Cursor::new(Vec::new())).unwrap());
         Self { config, engine }
     }
 
@@ -53,7 +53,7 @@ impl Server {
         Ok(())
     }
 
-    async fn sql_accept(listener: TcpListener, engine: &Local<Engine>) -> anyhow::Result<()> {
+    async fn sql_accept(listener: TcpListener, engine: &Engine) -> anyhow::Result<()> {
         loop {
             let (mut socket, _) = listener.accept().await?;
             log::info!("Accepted SQL connection from {}", socket.peer_addr()?);
@@ -69,7 +69,7 @@ impl Server {
 
     async fn sql_session(
         socket: &mut TcpStream,
-        mut session: Session<'_, Local<Engine>>,
+        mut session: Session<'_, Engine>,
     ) -> anyhow::Result<()> {
         let (rx, mut tx) = socket.split();
         let rx = BufReader::new(rx);
@@ -85,11 +85,11 @@ impl Server {
                 }
             };
 
-            log::info!("Request: {req}");
+            log::info!("Request: {req:?}");
 
             let resp = Self::process_request(&mut session, &req);
 
-            log::info!("Response: {resp}");
+            log::info!("Response: {resp:?}");
 
             let resp = format!("{}\n", serde_json::to_string(&resp)?);
             tx.write_all(resp.as_bytes()).await?;
@@ -98,7 +98,7 @@ impl Server {
         Ok(())
     }
 
-    fn process_request(session: &mut Session<'_, Local<Engine>>, request: &Request) -> Response {
+    fn process_request(session: &mut Session<'_, Engine>, request: &Request) -> Response {
         match request {
             Request::Debug(sql) => {
                 let ast = match Parser::parse_sql(&GenericDialect {}, sql) {
