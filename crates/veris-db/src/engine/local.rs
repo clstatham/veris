@@ -186,13 +186,13 @@ impl<E: StorageEngine + 'static> Transaction for LocalTransaction<E> {
         }
 
         for id in ids {
-            if !indices.is_empty() {
-                if let Some(row) = self.get_row(&table.name, id)? {
-                    for (i, column) in indices.iter().copied() {
-                        let mut ids = self.get_index(&table.name, &column.name, &row[i])?;
-                        ids.remove(id);
-                        self.set_index(&table.name, &column.name, &row[i], &ids)?;
-                    }
+            if !indices.is_empty()
+                && let Some(row) = self.get_row(&table.name, id)?
+            {
+                for (i, column) in indices.iter().copied() {
+                    let mut ids = self.get_index(&table.name, &column.name, &row[i])?;
+                    ids.remove(id);
+                    self.set_index(&table.name, &column.name, &row[i], &ids)?;
                 }
             }
 

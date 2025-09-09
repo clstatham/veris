@@ -149,10 +149,10 @@ impl Value {
                         if f_str.len() > *p as usize {
                             return false;
                         }
-                        if let Some(dot_pos) = f_str.find('.') {
-                            if f_str.len() - dot_pos - 1 > *s as usize {
-                                return false;
-                            }
+                        if let Some(dot_pos) = f_str.find('.')
+                            && f_str.len() - dot_pos - 1 > *s as usize
+                        {
+                            return false;
                         }
                     } else {
                         let f_str = f.to_string();
@@ -205,13 +205,13 @@ impl Value {
                                 to: *data_type,
                             });
                         }
-                        if let Some(dot_pos) = f_str.find('.') {
-                            if f_str.len() - dot_pos - 1 > *s as usize {
-                                return Err(Error::InvalidCast {
-                                    value: self.clone(),
-                                    to: *data_type,
-                                });
-                            }
+                        if let Some(dot_pos) = f_str.find('.')
+                            && f_str.len() - dot_pos - 1 > *s as usize
+                        {
+                            return Err(Error::InvalidCast {
+                                value: self.clone(),
+                                to: *data_type,
+                            });
                         }
                     } else {
                         let f_str = f.to_string();

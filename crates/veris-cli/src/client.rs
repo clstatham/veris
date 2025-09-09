@@ -81,19 +81,18 @@ impl Client {
                             ControlFlow::Response(resp) => self.handle_response(resp)?,
                         },
                         Err(e) => {
-                            if let ClientError::Serialization(e) = &e {
-                                if let Some(kind) = e.io_error_kind() {
-                                    if matches!(
-                                        kind,
-                                        io::ErrorKind::UnexpectedEof
-                                            | io::ErrorKind::ConnectionReset
-                                            | io::ErrorKind::ConnectionAborted
-                                            | io::ErrorKind::BrokenPipe
-                                    ) {
-                                        log::warn!("Server closed connection");
-                                        break 'repl;
-                                    }
-                                }
+                            if let ClientError::Serialization(e) = &e
+                                && let Some(kind) = e.io_error_kind()
+                                && matches!(
+                                    kind,
+                                    io::ErrorKind::UnexpectedEof
+                                        | io::ErrorKind::ConnectionReset
+                                        | io::ErrorKind::ConnectionAborted
+                                        | io::ErrorKind::BrokenPipe
+                                )
+                            {
+                                log::warn!("Server closed connection");
+                                break 'repl;
                             }
                             log::error!("Error: {e}");
                         }

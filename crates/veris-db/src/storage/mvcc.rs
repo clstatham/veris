@@ -130,7 +130,7 @@ pub struct MvccTransactionState {
 }
 
 impl MvccTransactionState {
-    pub fn is_version_visible(&self, version: Version) -> bool {
+    fn is_version_visible(&self, version: Version) -> bool {
         if self.active_txns.contains(&version) {
             false
         } else if self.read_only {
@@ -391,10 +391,10 @@ impl<E: StorageEngine> Iterator for MvccScanIterator<E> {
     type Item = Result<(ByteVec, ByteVec), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.buffer.is_empty() {
-            if let Err(error) = self.fill_buffer() {
-                return Some(Err(error));
-            }
+        if self.buffer.is_empty()
+            && let Err(error) = self.fill_buffer()
+        {
+            return Some(Err(error));
         }
         self.buffer.pop_front().map(Ok)
     }

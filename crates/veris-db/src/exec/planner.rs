@@ -32,11 +32,11 @@ impl<'a, C: Catalog> Planner<'a, C> {
             ast::Statement::Drop {
                 object_type, names, ..
             } => {
-                if object_type == &ast::ObjectType::Table {
-                    if let Some(name) = names.first() {
-                        let table = name.to_string();
-                        return self.plan_drop_table(&table);
-                    }
+                if object_type == &ast::ObjectType::Table
+                    && let Some(name) = names.first()
+                {
+                    let table = name.to_string();
+                    return self.plan_drop_table(&table);
                 }
                 Err(Error::NotYetSupported(statement.to_string()))
             }
@@ -456,20 +456,20 @@ impl<'a, C: Catalog> Planner<'a, C> {
         for item in exprs {
             match item {
                 ast::SelectItem::UnnamedExpr(ast::Expr::Function(func)) => {
-                    if func.over.is_none() {
-                        if let Some(agg) = self.build_aggregate(func, scope)? {
-                            aggregates.push((func.clone(), agg));
-                        }
+                    if func.over.is_none()
+                        && let Some(agg) = self.build_aggregate(func, scope)?
+                    {
+                        aggregates.push((func.clone(), agg));
                     }
                 }
                 ast::SelectItem::ExprWithAlias {
                     expr: ast::Expr::Function(func),
                     ..
                 } => {
-                    if func.over.is_none() {
-                        if let Some(agg) = self.build_aggregate(func, scope)? {
-                            aggregates.push((func.clone(), agg));
-                        }
+                    if func.over.is_none()
+                        && let Some(agg) = self.build_aggregate(func, scope)?
+                    {
+                        aggregates.push((func.clone(), agg));
                     }
                 }
                 _ => {}
